@@ -40,6 +40,20 @@ therefore also remain hidden.
 - Expose thinking values not accepted by the active CLI.
 - Change Kimi's Early Access status or unrelated adapter behavior.
 
+## Provider Adapter Decisions
+
+| Provider | Decision               | Reason                                                                                 |
+| -------- | ---------------------- | -------------------------------------------------------------------------------------- |
+| Kimi     | Update model discovery | Kimi Code CLI 0.29.1 advertises its catalog through an ACP model config option.        |
+| Codex    | Unchanged              | Codex uses its own app-server model discovery and does not consume Kimi ACP responses. |
+| Claude   | Unchanged              | Claude uses its SDK adapter and provider-specific option mapping.                      |
+| Cursor   | Unchanged              | Cursor's ACP model behavior is independent of Kimi's response shape.                   |
+| Grok     | Unchanged              | Grok retains its existing ACP model-state implementation.                              |
+| OpenCode | Unchanged              | OpenCode uses its own provider API and model discovery path.                           |
+
+No provider is marked unsupported: this is a compatibility fix for Kimi's provider boundary, and
+the other five adapters continue using their existing supported paths.
+
 ## Design
 
 ### Normalize ACP model discovery at the provider boundary

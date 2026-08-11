@@ -15,6 +15,20 @@
 - Preserve older ACP implementations that return `models.availableModels`.
 - Do not change contracts, web, mobile, orchestration, or shared ACP runtime behavior.
 - Use only focused tests and the targeted server typecheck.
+- Run every JavaScript or TypeScript repository command from a fresh login shell where
+  `node --version` satisfies `package.json`'s `^24.13.1` requirement. The implementation shell was
+  verified with Node `v24.14.0`; do not copy a machine-specific Node path into repository commands.
+
+## Provider Adapter Decisions
+
+| Provider | Decision                                   | Verification                                                 |
+| -------- | ------------------------------------------ | ------------------------------------------------------------ |
+| Kimi     | Update generic ACP model-option discovery. | Focused Kimi provider fixture and live ACP probe.            |
+| Codex    | Unchanged.                                 | Final diff check confirms no Codex adapter files changed.    |
+| Claude   | Unchanged.                                 | Final diff check confirms no Claude adapter files changed.   |
+| Cursor   | Unchanged.                                 | Final diff check confirms no Cursor adapter files changed.   |
+| Grok     | Unchanged.                                 | Final diff check confirms no Grok adapter files changed.     |
+| OpenCode | Unchanged.                                 | Final diff check confirms no OpenCode adapter files changed. |
 
 ---
 
@@ -93,6 +107,7 @@ empty provider model list for the current Kimi CLI.
 Run:
 
 ```powershell
+node --version # Must satisfy ^24.13.1 before running pnpm.
 pnpm exec vp test run apps/server/src/provider/Layers/KimiProvider.test.ts
 ```
 
@@ -183,6 +198,7 @@ then run the existing per-model capability loop.
 Run:
 
 ```powershell
+node --version # Must satisfy ^24.13.1 before running pnpm.
 pnpm exec vp test run apps/server/src/provider/Layers/KimiProvider.test.ts
 ```
 
@@ -194,6 +210,7 @@ deduplication, and legacy fallback.
 Run:
 
 ```powershell
+node --version # Must satisfy ^24.13.1 before running pnpm.
 $env:T3_KIMI_ACP_PROBE='1'
 pnpm exec vp test run apps/server/src/provider/acp/KimiAcpCliProbe.test.ts
 Remove-Item Env:T3_KIMI_ACP_PROBE
@@ -207,6 +224,7 @@ without sending a prompt.
 Run:
 
 ```powershell
+node --version # Must satisfy ^24.13.1 before running pnpm.
 pnpm exec vp run --filter t3 typecheck
 git diff --check
 git diff -- apps/server/src/provider/Layers/KimiProvider.ts apps/server/src/provider/Layers/KimiProvider.test.ts
@@ -241,9 +259,11 @@ git commit -m "fix(provider): discover current Kimi models"
 - [ ] **Step 1: Run final focused verification from a clean command**
 
 ```powershell
+node --version # Must satisfy ^24.13.1 before running pnpm.
 pnpm exec vp test run apps/server/src/provider/Layers/KimiProvider.test.ts apps/server/src/provider/acp/KimiAcpCliProbe.test.ts
 pnpm exec vp run --filter t3 typecheck
 git diff --check fork/main...HEAD
+git diff --exit-code fork/main...HEAD -- apps/server/src/provider/Layers/CodexProvider.ts apps/server/src/provider/Layers/ClaudeProvider.ts apps/server/src/provider/Layers/CursorProvider.ts apps/server/src/provider/Layers/GrokProvider.ts apps/server/src/provider/Layers/OpenCodeProvider.ts
 git status --short
 ```
 

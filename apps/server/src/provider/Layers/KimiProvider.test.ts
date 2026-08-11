@@ -213,6 +213,32 @@ describe("kimiModelStateFromSessionSetup", () => {
       availableModels: models.availableModels,
     });
   });
+
+  it("falls back to legacy ACP model state when the model option has no usable values", () => {
+    const models = {
+      currentModelId: "kimi-k2",
+      availableModels: [{ modelId: "kimi-k2", name: "Kimi K2" }],
+    } satisfies EffectAcpSchema.SessionModelState;
+
+    expect(
+      kimiModelStateFromSessionSetup({
+        models,
+        configOptions: [
+          {
+            id: "model",
+            name: "Model",
+            category: "model",
+            type: "select",
+            currentValue: "",
+            options: [{ value: " ", name: "Blank" }],
+          },
+        ],
+      }),
+    ).toEqual({
+      currentModelId: "kimi-k2",
+      availableModels: models.availableModels,
+    });
+  });
 });
 
 describe("checkKimiProviderStatus", () => {
