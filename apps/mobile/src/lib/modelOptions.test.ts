@@ -10,6 +10,30 @@ import {
 } from "./modelOptions";
 
 describe("mobile model options", () => {
+  it("uses the Kimi product name when a snapshot has no display name", () => {
+    const config = {
+      providers: [
+        {
+          instanceId: "kimi",
+          driver: "kimi",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          models: [
+            {
+              slug: "kimi-dynamic-model",
+              name: "Kimi Dynamic Model",
+              isCustom: false,
+              capabilities: null,
+            },
+          ],
+        },
+      ],
+    } as unknown as ServerConfig;
+
+    expect(groupByProvider(buildModelOptions(config, null))[0]?.providerLabel).toBe("Kimi");
+  });
+
   it("groups models by provider and flags legacy entries", () => {
     const config = {
       providers: [
