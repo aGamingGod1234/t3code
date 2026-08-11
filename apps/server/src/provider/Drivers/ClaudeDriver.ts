@@ -55,7 +55,6 @@ import {
   type ProviderSnapshotSettings,
 } from "../providerUpdateSettings.ts";
 import { makeClaudeCapabilitiesCacheKey, makeClaudeContinuationGroupKey } from "./ClaudeHome.ts";
-import { makeClaudeProviderQuota } from "./ClaudeProviderQuota.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
@@ -144,11 +143,9 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         continuationGroupKey,
       });
 
-      const quotaTracker = yield* makeClaudeProviderQuota(instanceId);
       const adapterOptions = {
         instanceId,
         environment: processEnv,
-        onRateLimitEvent: quotaTracker.recordRateLimitEvent,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
       };
       const adapter = yield* makeClaudeAdapter(effectiveConfig, adapterOptions);
@@ -219,7 +216,6 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         snapshot,
         adapter,
         textGeneration,
-        quota: quotaTracker.quota,
       } satisfies ProviderInstance;
     }),
 };

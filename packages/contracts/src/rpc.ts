@@ -174,13 +174,6 @@ import {
   ResourceTelemetrySnapshot,
 } from "./resourceTelemetry.ts";
 import { UsageReadError, UsageSummary, UsageSummaryInput } from "./usage.ts";
-import {
-  ProviderQuotaConsumeResetError,
-  ProviderQuotaConsumeResetInput,
-  ProviderQuotaConsumeResetOutcome,
-  ProviderQuotaReadError,
-  ProviderQuotaSummary,
-} from "./providerQuota.ts";
 import { ServerSettings, ServerSettingsError, ServerSettingsPatch } from "./settings.ts";
 import {
   SourceControlCloneRepositoryInput,
@@ -274,8 +267,6 @@ export const WS_METHODS = {
   serverReportHostPowerState: "server.reportHostPowerState",
   serverGetBackgroundPolicy: "server.getBackgroundPolicy",
   serverGetUsageSummary: "server.getUsageSummary",
-  serverGetProviderQuota: "server.getProviderQuota",
-  serverConsumeProviderQuotaReset: "server.consumeProviderQuotaReset",
 
   // Cloud environment methods
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
@@ -433,21 +424,6 @@ export const WsServerGetUsageSummaryRpc = Rpc.make(WS_METHODS.serverGetUsageSumm
   success: UsageSummary,
   error: Schema.Union([EnvironmentAuthorizationError, UsageReadError]),
 });
-
-export const WsServerGetProviderQuotaRpc = Rpc.make(WS_METHODS.serverGetProviderQuota, {
-  payload: Schema.Struct({}),
-  success: ProviderQuotaSummary,
-  error: Schema.Union([EnvironmentAuthorizationError, ProviderQuotaReadError]),
-});
-
-export const WsServerConsumeProviderQuotaResetRpc = Rpc.make(
-  WS_METHODS.serverConsumeProviderQuotaReset,
-  {
-    payload: ProviderQuotaConsumeResetInput,
-    success: ProviderQuotaConsumeResetOutcome,
-    error: Schema.Union([EnvironmentAuthorizationError, ProviderQuotaConsumeResetError]),
-  },
-);
 
 export const WsServerSignalProcessRpc = Rpc.make(WS_METHODS.serverSignalProcess, {
   payload: ServerSignalProcessInput,
@@ -988,8 +964,6 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetResourceTelemetryHistoryRpc,
   WsServerRetryResourceTelemetryRpc,
   WsServerGetUsageSummaryRpc,
-  WsServerGetProviderQuotaRpc,
-  WsServerConsumeProviderQuotaResetRpc,
   WsServerSignalProcessRpc,
   WsServerReportClientActivityRpc,
   WsServerReportHostPowerStateRpc,
