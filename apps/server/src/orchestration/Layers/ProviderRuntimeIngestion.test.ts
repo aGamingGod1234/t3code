@@ -1138,6 +1138,61 @@ describe("ProviderRuntimeIngestion", () => {
     expect(JSON.stringify(imageMessage)).not.toContain("data:image/png");
   });
 
+  it("copies Claude tool-result images with nested base64 sources", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-claude-image-completed"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-claude-image"),
+      itemId: asItemId("item-claude-image"),
+      payload: {
+        itemType: "dynamic_tool_call",
+        status: "completed",
+        title: "Generated image",
+        data: {
+          type: "tool_result",
+          tool_use_id: "tool-image-1",
+          content: [
+            {
+              type: "image",
+              source: {
+                type: "base64",
+                media_type: "image/png",
+                data: ONE_PIXEL_PNG_BASE64,
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.turnId === "turn-claude-image" && (message.attachments?.length ?? 0) === 1,
+      ),
+    );
+    const imageMessage = thread.messages.find(
+      (entry: ProviderRuntimeTestMessage) =>
+        entry.turnId === "turn-claude-image" && (entry.attachments?.length ?? 0) === 1,
+    );
+
+    expect(imageMessage?.attachments).toEqual([
+      expect.objectContaining({
+        type: "image",
+        name: "generated-image.png",
+        mimeType: "image/png",
+        sizeBytes: 67,
+      }),
+    ]);
+    expect(JSON.stringify(imageMessage)).not.toContain(ONE_PIXEL_PNG_BASE64);
+  });
+
   it("preserves completed tool metadata on projected tool activities", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

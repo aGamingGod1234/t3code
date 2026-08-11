@@ -98,10 +98,25 @@ function seedGeneratedImageProjection() {
         "message-inline-image-assistant",
         "thread-inline-image",
         "turn-inline-image",
-        "Here is the generated PNG.",
+        "",
         "2026-08-11T06:55:02.000Z",
         "2026-08-11T06:55:02.000Z",
         attachment,
+      );
+    database
+      .prepare(
+        `INSERT INTO projection_thread_messages (
+          message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at,
+          attachments_json
+        ) VALUES (?, ?, ?, 'assistant', ?, 0, ?, ?, '[]')`,
+      )
+      .run(
+        "message-inline-image-final",
+        "thread-inline-image",
+        "turn-inline-image",
+        "Here is the generated PNG.",
+        "2026-08-11T06:55:03.000Z",
+        "2026-08-11T06:55:03.000Z",
       );
     database.exec("COMMIT");
   } catch (error) {

@@ -36,6 +36,8 @@ export type AssistantImageInput =
     };
 
 const MAX_TRAVERSAL_DEPTH = 8;
+const MAX_BASE64_IMAGE_CHARS = Math.ceil(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES / 3) * 4;
+const MAX_IMAGE_DATA_URL_CHARS = MAX_BASE64_IMAGE_CHARS + 1_024;
 
 function stringProperty(record: { [x: PropertyKey]: unknown }, key: string): string | undefined {
   const value = record[key];
@@ -60,6 +62,9 @@ function dataUrlInput(
   dataUrl: string,
   suggestedName: string | undefined,
 ): AssistantImageInput | null {
+  if (dataUrl.length > MAX_IMAGE_DATA_URL_CHARS) {
+    return null;
+  }
   const parsed = parseBase64DataUrl(dataUrl);
   if (!parsed?.mimeType.startsWith("image/")) {
     return null;
@@ -76,7 +81,7 @@ function rawBase64Input(
   mimeType: string | undefined,
   suggestedName: string | undefined,
 ): AssistantImageInput | null {
-  if (!mimeType?.toLowerCase().startsWith("image/")) {
+  if (base64.length > MAX_BASE64_IMAGE_CHARS || !mimeType?.toLowerCase().startsWith("image/")) {
     return null;
   }
   const normalizedMimeType = mimeType.toLowerCase();
@@ -169,6 +174,16 @@ export function extractAssistantImageInputs(payload: unknown): ReadonlyArray<Ass
         add(dataUrlInput(data, suggestedName) ?? rawBase64Input(data, mimeType, suggestedName));
         return;
       }
+
+      const source = value["source"];
+      if (Predicate.isObject(source) && stringProperty(source, "type") === "base64") {
+        const sourceData = stringProperty(source, "data");
+        const sourceMimeType = stringProperty(source, "media_type");
+        if (sourceData) {
+          add(rawBase64Input(sourceData, sourceMimeType, suggestedName));
+          return;
+        }
+      }
     }
 
     for (const nested of Object.values(value)) {
@@ -190,6 +205,15 @@ function bytesFromInput(input: Exclude<AssistantImageInput, { _tag: "local-file"
       ? parseBase64DataUrl(input.dataUrl)
       : parseBase64DataUrl(`data:${input.mimeType};base64,${input.base64}`);
   if (!parsed?.mimeType.startsWith("image/")) {
+    return null;
+  }
+  const padding = parsed.base64.endsWith("==") ? 2 : parsed.base64.endsWith("=") ? 1 : 0;
+  const decodedByteLength = (parsed.base64.length / 4) * 3 - padding;
+  if (
+    parsed.base64.length > MAX_BASE64_IMAGE_CHARS ||
+    decodedByteLength <= 0 ||
+    decodedByteLength > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES
+  ) {
     return null;
   }
   const bytes = Buffer.from(parsed.base64, "base64");

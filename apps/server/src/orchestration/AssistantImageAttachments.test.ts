@@ -1,5 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { ThreadId } from "@t3tools/contracts";
+import { PROVIDER_SEND_TURN_MAX_IMAGE_BYTES, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -14,6 +14,9 @@ import {
 
 const ONE_PIXEL_PNG_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2ZQAAAABJRU5ErkJggg==";
+const testLayer = ServerConfig.layerTest(process.cwd(), {
+  prefix: "t3-assistant-image-test-",
+}).pipe(Layer.provideMerge(NodeServices.layer));
 
 describe("extractAssistantImageInputs", () => {
   it("extracts MCP image blocks with raw base64 bytes", () => {
@@ -57,6 +60,57 @@ describe("extractAssistantImageInputs", () => {
       },
     ]);
   });
+
+  it("extracts Claude image blocks with nested base64 sources", () => {
+    expect(
+      extractAssistantImageInputs({
+        type: "tool_result",
+        content: [
+          {
+            type: "image",
+            source: {
+              type: "base64",
+              media_type: "image/png",
+              data: ONE_PIXEL_PNG_BASE64,
+            },
+          },
+        ],
+      }),
+    ).toEqual([
+      {
+        _tag: "base64",
+        base64: ONE_PIXEL_PNG_BASE64,
+        mimeType: "image/png",
+        name: "generated-image.png",
+      },
+    ]);
+  });
+
+  it.effect("rejects oversized base64 before decoding", () =>
+    Effect.gen(function* () {
+      const oversizedBase64 = "A".repeat(Math.ceil(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES / 3) * 4 + 4);
+      expect(
+        extractAssistantImageInputs({
+          type: "image",
+          mimeType: "image/png",
+          data: oversizedBase64,
+        }),
+      ).toEqual([]);
+      expect(
+        yield* persistAssistantImageInputs({
+          threadId: ThreadId.make("thread-oversized-image"),
+          inputs: [
+            {
+              _tag: "base64",
+              base64: oversizedBase64,
+              mimeType: "image/png",
+              name: "oversized.png",
+            },
+          ],
+        }),
+      ).toEqual([]);
+    }).pipe(Effect.provide(testLayer)),
+  );
 
   it("extracts only the explicit saved path from native image-generation items", () => {
     expect(
@@ -122,13 +176,7 @@ describe("extractAssistantImageInputs", () => {
             sourcePath,
             storedPath,
           };
-        }).pipe(
-          Effect.provide(
-            ServerConfig.layerTest(process.cwd(), {
-              prefix: "t3-assistant-image-test-",
-            }).pipe(Layer.provideMerge(NodeServices.layer)),
-          ),
-        ),
+        }).pipe(Effect.provide(testLayer)),
       );
 
       expect(result?.attachment).toEqual(
