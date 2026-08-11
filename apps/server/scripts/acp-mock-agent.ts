@@ -18,6 +18,8 @@ const emitInterleavedAssistantToolCalls =
   process.env.T3_ACP_EMIT_INTERLEAVED_ASSISTANT_TOOL_CALLS === "1";
 const emitGenericToolPlaceholders = process.env.T3_ACP_EMIT_GENERIC_TOOL_PLACEHOLDERS === "1";
 const emitAvailableCommandUpdates = process.env.T3_ACP_EMIT_AVAILABLE_COMMAND_UPDATES === "1";
+const emitAvailableCommandClearUpdates =
+  process.env.T3_ACP_EMIT_AVAILABLE_COMMAND_CLEAR_UPDATES === "1";
 const emitAskQuestion = process.env.T3_ACP_EMIT_ASK_QUESTION === "1";
 const emitXAiAskUserQuestion = process.env.T3_ACP_EMIT_XAI_ASK_USER_QUESTION === "1";
 const emitXAiPromptCompleteThenHang = process.env.T3_ACP_EMIT_XAI_PROMPT_COMPLETE_THEN_HANG === "1";
@@ -788,6 +790,23 @@ const program = Effect.gen(function* () {
               {
                 name: "skill:ship",
                 description: "Prepare the current change for delivery",
+              },
+            ],
+          },
+        });
+        return { stopReason: "end_turn" };
+      }
+
+      if (emitAvailableCommandClearUpdates) {
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "available_commands_update",
+            availableCommands: [
+              {
+                name: "skill:review",
+                description: "Review the current change",
+                input: { hint: "scope" },
               },
             ],
           },
