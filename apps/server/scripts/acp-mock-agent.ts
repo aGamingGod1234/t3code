@@ -792,6 +792,13 @@ const program = Effect.gen(function* () {
             ],
           },
         });
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "available_commands_update",
+            availableCommands: [],
+          },
+        });
         return { stopReason: "end_turn" };
       }
 

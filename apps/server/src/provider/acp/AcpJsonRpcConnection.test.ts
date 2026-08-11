@@ -116,7 +116,7 @@ describe("AcpSessionRuntime", () => {
     ),
   );
 
-  it.effect("replaces available command snapshots while preserving update events", () =>
+  it.effect("replaces then clears available command snapshots while preserving update events", () =>
     Effect.gen(function* () {
       const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
       yield* runtime.start();
@@ -125,7 +125,7 @@ describe("AcpSessionRuntime", () => {
         prompt: [{ type: "text", text: "show commands" }],
       });
 
-      const events = Array.from(yield* Stream.runCollect(Stream.take(runtime.getEvents(), 2)));
+      const events = Array.from(yield* Stream.runCollect(Stream.take(runtime.getEvents(), 3)));
       expect(events).toEqual([
         {
           _tag: "AvailableCommandsChanged",
@@ -146,14 +146,13 @@ describe("AcpSessionRuntime", () => {
             },
           ],
         },
-      ]);
-      const commands = yield* runtime.getAvailableCommands;
-      expect(commands).toEqual([
         {
-          name: "skill:ship",
-          description: "Prepare the current change for delivery",
+          _tag: "AvailableCommandsChanged",
+          commands: [],
         },
       ]);
+      const commands = yield* runtime.getAvailableCommands;
+      expect(commands).toEqual([]);
     }).pipe(
       Effect.provide(
         AcpSessionRuntime.layer({
