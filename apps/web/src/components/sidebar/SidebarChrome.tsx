@@ -23,6 +23,7 @@ import {
 } from "../ui/sidebar";
 import { SidebarProviderUpdatePill } from "./SidebarProviderUpdatePill";
 import { SidebarUpdatePill } from "./SidebarUpdatePill";
+import { ProviderUsageStrip } from "./ProviderUsageStrip";
 
 export const SidebarChromeHeader = memo(function SidebarChromeHeader({
   isElectron,
@@ -149,6 +150,7 @@ export const SidebarChromeFooter = memo(function SidebarChromeFooter() {
             </SidebarMenuButton>
           </SidebarMenuItem>
         ) : null}
+        <ProviderUsageStrip />
         <SidebarMenuItem>
           <SidebarMenuButton onClick={handleUsageClick}>
             <ChartNoAxesColumnIcon />
