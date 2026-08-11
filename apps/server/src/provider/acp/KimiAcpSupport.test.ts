@@ -77,4 +77,62 @@ describe("applyKimiAcpModelSelection", () => {
       { type: "config", id: "auto-approve", value: true },
     ]);
   });
+
+  it("skips stale flat and grouped select values while applying later advertised values", async () => {
+    const calls: Array<{ readonly id: string; readonly value: string | boolean }> = [];
+    const configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption> = [
+      {
+        id: "effort",
+        name: "Effort",
+        type: "select",
+        currentValue: "medium",
+        options: [
+          { value: "low", name: "Low" },
+          { value: "high", name: "High" },
+        ],
+      },
+      {
+        id: "region",
+        name: "Region",
+        type: "select",
+        currentValue: "us-east",
+        options: [
+          {
+            group: "North America",
+            name: "North America",
+            options: [
+              { value: "us-east", name: "US East" },
+              { value: "us-west", name: "US West" },
+            ],
+          },
+        ],
+      },
+    ];
+    const runtime = {
+      getConfigOptions: Effect.succeed(configOptions),
+      setModel: () => Effect.void,
+      setConfigOption: (id: string, value: string | boolean) =>
+        Effect.sync(() => {
+          calls.push({ id, value });
+        }),
+    };
+
+    await Effect.runPromise(
+      applyKimiAcpModelSelection({
+        runtime,
+        model: undefined,
+        selections: [
+          { id: "effort", value: "stale" },
+          { id: "effort", value: "high" },
+          { id: "region", value: "moon-base" },
+          { id: "region", value: "us-west" },
+        ],
+      }),
+    );
+
+    expect(calls).toEqual([
+      { id: "effort", value: "high" },
+      { id: "region", value: "us-west" },
+    ]);
+  });
 });

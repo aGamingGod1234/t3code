@@ -6,8 +6,8 @@ import * as Layer from "effect/Layer";
 import * as Scope from "effect/Scope";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import type * as EffectAcpErrors from "effect-acp/errors";
-import type * as EffectAcpSchema from "effect-acp/schema";
 
+import { collectSessionConfigOptionValues } from "./AcpRuntimeModel.ts";
 import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
 
 type KimiAcpRuntimeKimiSettings = Pick<KimiSettings, "binaryPath" | "launchArgs">;
@@ -82,9 +82,16 @@ export function applyKimiAcpModelSelection(input: {
     const configOptions = yield* input.runtime.getConfigOptions;
     for (const selection of input.selections ?? []) {
       const configOption = configOptions.find((option) => option.id === selection.id);
+      if (!configOption) {
+        continue;
+      }
+      if (configOption.type === "boolean" && typeof selection.value !== "boolean") {
+        continue;
+      }
       if (
-        !configOption ||
-        configOption.type !== (typeof selection.value === "boolean" ? "boolean" : "select")
+        configOption.type === "select" &&
+        (typeof selection.value !== "string" ||
+          !collectSessionConfigOptionValues(configOption).includes(selection.value))
       ) {
         continue;
       }

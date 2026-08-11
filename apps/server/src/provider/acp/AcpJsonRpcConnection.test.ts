@@ -529,7 +529,43 @@ describe("AcpSessionRuntime", () => {
     ),
   );
 
-  it.effect("falls back to session/load after resume-first cannot resume a session", () => {
+  it.effect(
+    "uses session/load without attempting resume when the agent did not advertise it",
+    () => {
+      const requestEvents: Array<AcpSessionRuntime.AcpSessionRequestLogEvent> = [];
+      return Effect.gen(function* () {
+        const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+        const started = yield* runtime.start();
+
+        expect(started.sessionId).toBe("mock-session-1");
+        expect(
+          requestEvents.filter((event) => event.status === "started").map((event) => event.method),
+        ).toEqual(["initialize", "authenticate", "session/load"]);
+      }).pipe(
+        Effect.provide(
+          AcpSessionRuntime.layer({
+            authMethodId: "test",
+            spawn: {
+              command: mockAgentCommand,
+              args: mockAgentArgs,
+            },
+            cwd: process.cwd(),
+            resumeSessionId: "mock-session-1",
+            resumeStrategy: "resume-first",
+            clientInfo: { name: "t3-test", version: "0.0.0" },
+            requestLogger: (event) =>
+              Effect.sync(() => {
+                requestEvents.push(event);
+              }),
+          }),
+        ),
+        Effect.scoped,
+        Effect.provide(NodeServices.layer),
+      );
+    },
+  );
+
+  it.effect("falls back to session/load only when an advertised resume method is missing", () => {
     const requestEvents: Array<AcpSessionRuntime.AcpSessionRequestLogEvent> = [];
     return Effect.gen(function* () {
       const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
@@ -546,6 +582,44 @@ describe("AcpSessionRuntime", () => {
           spawn: {
             command: mockAgentCommand,
             args: mockAgentArgs,
+            env: { T3_ACP_ADVERTISE_RESUME: "1" },
+          },
+          cwd: process.cwd(),
+          resumeSessionId: "mock-session-1",
+          resumeStrategy: "resume-first",
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+          requestLogger: (event) =>
+            Effect.sync(() => {
+              requestEvents.push(event);
+            }),
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    );
+  });
+
+  it.effect("propagates an advertised resume failure other than method-not-found", () => {
+    const requestEvents: Array<AcpSessionRuntime.AcpSessionRequestLogEvent> = [];
+    return Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+      const error = yield* runtime.start().pipe(Effect.flip);
+
+      expect(error).toMatchObject({ _tag: "AcpRequestError", code: -32602 });
+      expect(
+        requestEvents.filter((event) => event.status === "started").map((event) => event.method),
+      ).toEqual(["initialize", "authenticate", "session/resume"]);
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          authMethodId: "test",
+          spawn: {
+            command: mockAgentCommand,
+            args: mockAgentArgs,
+            env: {
+              T3_ACP_ADVERTISE_RESUME: "1",
+              T3_ACP_FAIL_RESUME_SESSION: "1",
+            },
           },
           cwd: process.cwd(),
           resumeSessionId: "mock-session-1",

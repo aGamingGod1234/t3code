@@ -564,8 +564,11 @@ export const make = (
           cwd: options.cwd,
           mcpServers: options.mcpServers ?? [],
         } satisfies EffectAcpSchema.LoadSessionRequest;
+        const resumeCapability = initializeResult.agentCapabilities?.sessionCapabilities?.resume;
         const resumed =
-          options.resumeStrategy === "resume-first"
+          options.resumeStrategy === "resume-first" &&
+          resumeCapability !== null &&
+          resumeCapability !== undefined
             ? yield* Effect.gen(function* () {
                 yield* logRequest({
                   method: "session/resume",
@@ -587,7 +590,18 @@ export const make = (
                       payload: loadPayload,
                       status: "failed",
                       cause,
-                    }).pipe(Effect.as(undefined)),
+                    }).pipe(
+                      Effect.andThen(() => {
+                        const [reason] = cause.reasons;
+                        return cause.reasons.length === 1 &&
+                          reason !== undefined &&
+                          Cause.isFailReason(reason) &&
+                          reason.error._tag === "AcpRequestError" &&
+                          reason.error.code === -32601
+                          ? Effect.void
+                          : Effect.failCause(cause);
+                      }),
+                    ),
                   ),
                 );
               })
