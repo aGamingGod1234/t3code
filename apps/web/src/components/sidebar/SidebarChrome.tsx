@@ -1,3 +1,4 @@
+import type { ProviderInstanceId } from "@t3tools/contracts";
 import { ChartNoAxesColumnIcon, GitPullRequestIcon, SettingsIcon } from "lucide-react";
 import { memo, useCallback } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
@@ -131,11 +132,20 @@ export const SidebarChromeFooter = memo(function SidebarChromeFooter() {
   }, [closeMobileSidebar, navigate]);
 
   const handleUsageClick = useCallback(() => {
-    if (isMobile) {
-      setOpenMobile(false);
-    }
+    closeMobileSidebar();
     void navigate({ to: "/usage" });
-  }, [isMobile, navigate, setOpenMobile]);
+  }, [closeMobileSidebar, navigate]);
+  const handleProviderUsageClick = useCallback(
+    (provider: ProviderInstanceId) => {
+      closeMobileSidebar();
+      void navigate({
+        to: "/usage",
+        search: { provider },
+        hash: "provider-limits",
+      });
+    },
+    [closeMobileSidebar, navigate],
+  );
 
   return (
     <SidebarFooter className="p-[var(--sidebar-content-inset)]">
@@ -150,7 +160,7 @@ export const SidebarChromeFooter = memo(function SidebarChromeFooter() {
             </SidebarMenuButton>
           </SidebarMenuItem>
         ) : null}
-        <ProviderUsageStrip />
+        <ProviderUsageStrip onSelect={handleProviderUsageClick} />
         <SidebarMenuItem>
           <SidebarMenuButton onClick={handleUsageClick}>
             <ChartNoAxesColumnIcon />
