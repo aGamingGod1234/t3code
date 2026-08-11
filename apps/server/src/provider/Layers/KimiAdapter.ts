@@ -1,0 +1,692 @@
+/**
+ * KimiAdapterLive - Kimi Code (`kimi acp`) sessions via the standard ACP runtime.
+ *
+ * @module KimiAdapterLive
+ */
+import {
+  ApprovalRequestId,
+  type KimiSettings,
+  EventId,
+  type ProviderApprovalDecision,
+  type ProviderRuntimeEvent,
+  type ProviderSession,
+  type ProviderUserInputAnswers,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  RuntimeRequestId,
+  type ThreadId,
+  TurnId,
+} from "@t3tools/contracts";
+import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import * as PubSub from "effect/PubSub";
+import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
+import * as Stream from "effect/Stream";
+import * as SynchronizedRef from "effect/SynchronizedRef";
+import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
+import * as EffectAcpErrors from "effect-acp/errors";
+import type * as EffectAcpSchema from "effect-acp/schema";
+
+import { resolveAttachmentPath } from "../../attachmentStore.ts";
+import { ServerConfig } from "../../config.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import {
+  ProviderAdapterProcessError,
+  ProviderAdapterRequestError,
+  ProviderAdapterSessionNotFoundError,
+  ProviderAdapterValidationError,
+} from "../Errors.ts";
+import { acpPermissionOutcome, mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
+import {
+  makeAcpAssistantItemEvent,
+  makeAcpContentDeltaEvent,
+  makeAcpPlanUpdatedEvent,
+  makeAcpRequestOpenedEvent,
+  makeAcpRequestResolvedEvent,
+  makeAcpToolCallEvent,
+} from "../acp/AcpCoreRuntimeEvents.ts";
+import { applyKimiAcpModelSelection, makeKimiAcpRuntime } from "../acp/KimiAcpSupport.ts";
+import { parsePermissionRequest } from "../acp/AcpRuntimeModel.ts";
+import type * as AcpSessionRuntime from "../acp/AcpSessionRuntime.ts";
+import type { KimiAdapterShape } from "../Services/KimiAdapter.ts";
+
+const PROVIDER = ProviderDriverKind.make("kimi");
+const KIMI_RESUME_VERSION = 1 as const;
+const KimiResumeCursor = Schema.Struct({
+  schemaVersion: Schema.Literal(KIMI_RESUME_VERSION),
+  sessionId: Schema.String,
+});
+
+export interface KimiAdapterLiveOptions {
+  readonly environment?: NodeJS.ProcessEnv;
+  readonly instanceId?: ProviderInstanceId;
+}
+
+interface PendingApproval {
+  readonly decision: Deferred.Deferred<ProviderApprovalDecision>;
+  readonly permission: ReturnType<typeof parsePermissionRequest>;
+}
+
+interface KimiSessionContext {
+  readonly threadId: ThreadId;
+  readonly acpSessionId: string;
+  readonly scope: Scope.Closeable;
+  readonly acp: AcpSessionRuntime.AcpSessionRuntime["Service"];
+  session: ProviderSession;
+  activeTurnId: TurnId | undefined;
+  promptsInFlight: number;
+  readonly interruptedTurnIds: Set<TurnId>;
+  readonly turns: Array<{ id: TurnId; items: Array<unknown> }>;
+  readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
+  notificationFiber: Fiber.Fiber<void, never> | undefined;
+  readonly supportsImages: boolean;
+  stopped: boolean;
+}
+
+function parseKimiResume(raw: unknown): { readonly sessionId: string } | undefined {
+  if (!Schema.is(KimiResumeCursor)(raw) || !raw.sessionId.trim()) {
+    return undefined;
+  }
+  return { sessionId: raw.sessionId.trim() };
+}
+
+function selectAutoApprovedPermissionOption(
+  request: EffectAcpSchema.RequestPermissionRequest,
+): string | undefined {
+  const option = request.options.find(
+    (candidate) => candidate.kind === "allow_always" || candidate.kind === "allow_once",
+  );
+  return option?.optionId.trim() || undefined;
+}
+
+function initializedPromptSupportsImages(initializeResult: unknown): boolean {
+  const capabilities = (
+    initializeResult as {
+      readonly agentCapabilities?: { readonly promptCapabilities?: { readonly image?: boolean } };
+    }
+  ).agentCapabilities;
+  return capabilities?.promptCapabilities?.image === true;
+}
+
+export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapterLiveOptions) {
+  return Effect.gen(function* () {
+    const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("kimi");
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const serverConfig = yield* ServerConfig;
+    const crypto = yield* Crypto.Crypto;
+    const sessions = new Map<ThreadId, KimiSessionContext>();
+    const threadLocks = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
+    const runtimeEvents = yield* PubSub.unbounded<ProviderRuntimeEvent>();
+    const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+    const randomUUIDv4 = crypto.randomUUIDv4.pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "crypto/randomUUIDv4",
+            detail: "Failed to generate Kimi runtime identifier.",
+            cause,
+          }),
+      ),
+    );
+    const mapAcpCallbackFailure = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+      effect.pipe(
+        Effect.mapError(
+          (cause) =>
+            new EffectAcpErrors.AcpTransportError({
+              detail: "Failed to process Kimi ACP callback.",
+              cause,
+            }),
+        ),
+      );
+    const nextEventStamp = () =>
+      Effect.all({
+        eventId: randomUUIDv4.pipe(Effect.map(EventId.make)),
+        createdAt: nowIso,
+      });
+
+    const publish = (event: ProviderRuntimeEvent) =>
+      PubSub.publish(runtimeEvents, event).pipe(Effect.asVoid);
+    const getThreadLock = (threadId: string) =>
+      SynchronizedRef.modifyEffect(threadLocks, (current) => {
+        const existing = current.get(threadId);
+        if (existing) return Effect.succeed([existing, current] as const);
+        return Semaphore.make(1).pipe(
+          Effect.map(
+            (semaphore) => [semaphore, new Map(current).set(threadId, semaphore)] as const,
+          ),
+        );
+      });
+    const withThreadLock = <A, E, R>(threadId: string, effect: Effect.Effect<A, E, R>) =>
+      Effect.flatMap(getThreadLock(threadId), (lock) => lock.withPermit(effect));
+    const requireSession = (threadId: ThreadId) => {
+      const context = sessions.get(threadId);
+      return context && !context.stopped
+        ? Effect.succeed(context)
+        : Effect.fail(new ProviderAdapterSessionNotFoundError({ provider: PROVIDER, threadId }));
+    };
+    const settleApprovals = (pending: ReadonlyMap<ApprovalRequestId, PendingApproval>) =>
+      Effect.forEach(
+        pending.values(),
+        (approval) => Deferred.succeed(approval.decision, "cancel").pipe(Effect.ignore),
+        { discard: true },
+      );
+
+    const stopSessionInternal = (context: KimiSessionContext) =>
+      Effect.gen(function* () {
+        if (context.stopped) return;
+        context.stopped = true;
+        yield* settleApprovals(context.pendingApprovals);
+        if (context.notificationFiber) yield* Fiber.interrupt(context.notificationFiber);
+        yield* Effect.ignore(context.acp.cancel);
+        yield* Effect.ignore(Scope.close(context.scope, Exit.void));
+        sessions.delete(context.threadId);
+        McpProviderSession.clearMcpProviderSession(context.threadId);
+        yield* publish({
+          type: "session.exited",
+          ...(yield* nextEventStamp()),
+          provider: PROVIDER,
+          threadId: context.threadId,
+          payload: { exitKind: "graceful" },
+        });
+      });
+
+    const startSession: KimiAdapterShape["startSession"] = (input) =>
+      withThreadLock(
+        input.threadId,
+        Effect.gen(function* () {
+          if (input.provider !== undefined && input.provider !== PROVIDER) {
+            return yield* new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "startSession",
+              issue: `Expected provider '${PROVIDER}' but received '${input.provider}'.`,
+            });
+          }
+          if (!input.cwd?.trim()) {
+            return yield* new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "startSession",
+              issue: "cwd is required and must be non-empty.",
+            });
+          }
+          const existing = sessions.get(input.threadId);
+          if (existing) yield* stopSessionInternal(existing);
+
+          const scope = yield* Scope.make("sequential");
+          let transferred = false;
+          yield* Effect.addFinalizer(() =>
+            transferred ? Effect.void : Scope.close(scope, Exit.void),
+          );
+          const cwd = path.resolve(input.cwd.trim());
+          const resumeSessionId = parseKimiResume(input.resumeCursor)?.sessionId;
+          const mcp = McpProviderSession.readMcpProviderSession(input.threadId);
+          const acp = yield* makeKimiAcpRuntime({
+            kimiSettings,
+            ...(options?.environment ? { environment: options.environment } : {}),
+            childProcessSpawner,
+            cwd,
+            ...(resumeSessionId ? { resumeSessionId } : {}),
+            clientInfo: { name: "t3-code", version: "0.0.0" },
+            ...(mcp
+              ? {
+                  mcpServers: [
+                    {
+                      type: "http" as const,
+                      name: "t3-code",
+                      url: mcp.endpoint,
+                      headers: [{ name: "Authorization", value: mcp.authorizationHeader }],
+                    },
+                  ],
+                }
+              : {}),
+          }).pipe(
+            Effect.provideService(Crypto.Crypto, crypto),
+            Effect.provideService(Scope.Scope, scope),
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapterProcessError({
+                  provider: PROVIDER,
+                  threadId: input.threadId,
+                  detail: cause.message,
+                  cause,
+                }),
+            ),
+          );
+          const pendingApprovals = new Map<ApprovalRequestId, PendingApproval>();
+          let context: KimiSessionContext | undefined;
+          const started = yield* Effect.gen(function* () {
+            yield* acp.handleRequestPermission((params) =>
+              mapAcpCallbackFailure(
+                Effect.gen(function* () {
+                  if (input.runtimeMode === "full-access") {
+                    const optionId = selectAutoApprovedPermissionOption(params);
+                    if (optionId) return { outcome: { outcome: "selected" as const, optionId } };
+                  }
+                  const permission = parsePermissionRequest(params);
+                  const requestId = ApprovalRequestId.make(yield* randomUUIDv4);
+                  const decision = yield* Deferred.make<ProviderApprovalDecision>();
+                  pendingApprovals.set(requestId, { decision, permission });
+                  yield* publish(
+                    makeAcpRequestOpenedEvent({
+                      stamp: yield* nextEventStamp(),
+                      provider: PROVIDER,
+                      threadId: input.threadId,
+                      turnId: context?.activeTurnId,
+                      requestId: RuntimeRequestId.make(requestId),
+                      permissionRequest: permission,
+                      detail: permission.detail ?? "Kimi ACP permission request",
+                      args: params,
+                      source: "acp.jsonrpc",
+                      method: "session/request_permission",
+                      rawPayload: params,
+                    }),
+                  );
+                  const resolved = yield* Deferred.await(decision);
+                  pendingApprovals.delete(requestId);
+                  yield* publish(
+                    makeAcpRequestResolvedEvent({
+                      stamp: yield* nextEventStamp(),
+                      provider: PROVIDER,
+                      threadId: input.threadId,
+                      turnId: context?.activeTurnId,
+                      requestId: RuntimeRequestId.make(requestId),
+                      permissionRequest: permission,
+                      decision: resolved,
+                    }),
+                  );
+                  return {
+                    outcome:
+                      resolved === "cancel"
+                        ? ({ outcome: "cancelled" } as const)
+                        : {
+                            outcome: "selected" as const,
+                            optionId: acpPermissionOutcome(resolved),
+                          },
+                  };
+                }),
+              ),
+            );
+            return yield* acp.start();
+          }).pipe(
+            Effect.mapError((cause) =>
+              mapAcpToAdapterError(PROVIDER, input.threadId, "session/start", cause),
+            ),
+          );
+
+          const modelSelection =
+            input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;
+          yield* applyKimiAcpModelSelection({
+            runtime: acp,
+            model: modelSelection?.model,
+            selections: modelSelection?.options,
+          }).pipe(
+            Effect.mapError((cause) =>
+              mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_config_option", cause),
+            ),
+          );
+          const now = yield* nowIso;
+          const session: ProviderSession = {
+            provider: PROVIDER,
+            providerInstanceId: boundInstanceId,
+            status: "ready",
+            runtimeMode: input.runtimeMode,
+            cwd,
+            model: modelSelection?.model,
+            threadId: input.threadId,
+            resumeCursor: { schemaVersion: KIMI_RESUME_VERSION, sessionId: started.sessionId },
+            createdAt: now,
+            updatedAt: now,
+          };
+          context = {
+            threadId: input.threadId,
+            acpSessionId: started.sessionId,
+            scope,
+            acp,
+            session,
+            activeTurnId: undefined,
+            promptsInFlight: 0,
+            interruptedTurnIds: new Set(),
+            turns: [],
+            pendingApprovals,
+            notificationFiber: undefined,
+            supportsImages: initializedPromptSupportsImages(started.initializeResult),
+            stopped: false,
+          };
+          const ownedContext = context;
+          ownedContext.notificationFiber = yield* Stream.runDrain(
+            Stream.mapEffect(acp.getEvents(), (event) =>
+              Effect.gen(function* () {
+                if (event._tag === "EventStreamBarrier") {
+                  yield* Deferred.succeed(event.acknowledge, undefined);
+                  return;
+                }
+                if (ownedContext.stopped || sessions.get(ownedContext.threadId) !== ownedContext)
+                  return;
+                const eventInput = {
+                  stamp: yield* nextEventStamp(),
+                  provider: PROVIDER,
+                  threadId: ownedContext.threadId,
+                  turnId: ownedContext.activeTurnId,
+                };
+                switch (event._tag) {
+                  case "AssistantItemStarted":
+                    yield* publish(
+                      makeAcpAssistantItemEvent({
+                        ...eventInput,
+                        itemId: event.itemId,
+                        lifecycle: "item.started",
+                      }),
+                    );
+                    return;
+                  case "AssistantItemCompleted":
+                    yield* publish(
+                      makeAcpAssistantItemEvent({
+                        ...eventInput,
+                        itemId: event.itemId,
+                        lifecycle: "item.completed",
+                      }),
+                    );
+                    return;
+                  case "PlanUpdated":
+                    yield* publish(
+                      makeAcpPlanUpdatedEvent({
+                        ...eventInput,
+                        payload: event.payload,
+                        source: "acp.jsonrpc",
+                        method: "session/update",
+                        rawPayload: event.rawPayload,
+                      }),
+                    );
+                    return;
+                  case "ToolCallUpdated":
+                    yield* publish(
+                      makeAcpToolCallEvent({
+                        ...eventInput,
+                        toolCall: event.toolCall,
+                        rawPayload: event.rawPayload,
+                      }),
+                    );
+                    return;
+                  case "ContentDelta":
+                    yield* publish(
+                      makeAcpContentDeltaEvent({
+                        ...eventInput,
+                        ...(event.itemId ? { itemId: event.itemId } : {}),
+                        text: event.text,
+                        rawPayload: event.rawPayload,
+                      }),
+                    );
+                    return;
+                  default:
+                    return;
+                }
+              }),
+            ),
+          ).pipe(
+            Effect.catch(() => Effect.void),
+            Effect.forkChild,
+          );
+          sessions.set(input.threadId, ownedContext);
+          transferred = true;
+          yield* publish({
+            type: "session.started",
+            ...(yield* nextEventStamp()),
+            provider: PROVIDER,
+            threadId: input.threadId,
+            payload: { resume: started.initializeResult },
+          });
+          yield* publish({
+            type: "session.state.changed",
+            ...(yield* nextEventStamp()),
+            provider: PROVIDER,
+            threadId: input.threadId,
+            payload: { state: "ready", reason: "Kimi ACP session ready" },
+          });
+          yield* publish({
+            type: "thread.started",
+            ...(yield* nextEventStamp()),
+            provider: PROVIDER,
+            threadId: input.threadId,
+            payload: { providerThreadId: started.sessionId },
+          });
+          return session;
+        }).pipe(Effect.scoped),
+      );
+
+    const sendTurn: KimiAdapterShape["sendTurn"] = (input) =>
+      Effect.gen(function* () {
+        const context = yield* requireSession(input.threadId);
+        const steeringTurnId = context.promptsInFlight > 0 ? context.activeTurnId : undefined;
+        const turnId = steeringTurnId ?? TurnId.make(yield* randomUUIDv4);
+        context.promptsInFlight += 1;
+        return yield* Effect.gen(function* () {
+          const selection =
+            input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;
+          const model = selection?.model ?? context.session.model;
+          yield* applyKimiAcpModelSelection({
+            runtime: context.acp,
+            model,
+            selections: selection?.options,
+          }).pipe(
+            Effect.mapError((cause) =>
+              mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_config_option", cause),
+            ),
+          );
+          context.activeTurnId = turnId;
+          context.session = {
+            ...context.session,
+            status: "running",
+            activeTurnId: turnId,
+            updatedAt: yield* nowIso,
+            model,
+          };
+          if (!steeringTurnId) {
+            yield* publish({
+              type: "turn.started",
+              ...(yield* nextEventStamp()),
+              provider: PROVIDER,
+              threadId: input.threadId,
+              turnId,
+              payload: { model },
+            });
+          }
+          const prompt: Array<EffectAcpSchema.ContentBlock> = [];
+          if (input.input?.trim()) prompt.push({ type: "text", text: input.input.trim() });
+          for (const attachment of input.attachments ?? []) {
+            const attachmentPath = resolveAttachmentPath({
+              attachmentsDir: serverConfig.attachmentsDir,
+              attachment,
+            });
+            if (!attachmentPath) {
+              return yield* new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session/prompt",
+                detail: `Invalid attachment id '${attachment.id}'.`,
+              });
+            }
+            if (!context.supportsImages) {
+              prompt.push({ type: "text", text: `Attachment available at: ${attachmentPath}` });
+              continue;
+            }
+            const bytes = yield* fileSystem.readFile(attachmentPath).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapterRequestError({
+                    provider: PROVIDER,
+                    method: "session/prompt",
+                    detail: cause.message,
+                    cause,
+                  }),
+              ),
+            );
+            prompt.push({
+              type: "image",
+              data: Buffer.from(bytes).toString("base64"),
+              mimeType: attachment.mimeType,
+            });
+          }
+          if (prompt.length === 0) {
+            return yield* new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "sendTurn",
+              issue: "Turn requires non-empty text or attachments.",
+            });
+          }
+          const result = yield* context.acp
+            .prompt({ prompt })
+            .pipe(
+              Effect.mapError((cause) =>
+                mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", cause),
+              ),
+            );
+          if (
+            sessions.get(input.threadId) !== context ||
+            context.stopped ||
+            context.activeTurnId !== turnId
+          ) {
+            return { threadId: input.threadId, turnId, resumeCursor: context.session.resumeCursor };
+          }
+          const record = context.turns.find((entry) => entry.id === turnId);
+          if (record) record.items.push({ prompt, result });
+          else context.turns.push({ id: turnId, items: [{ prompt, result }] });
+          if (context.promptsInFlight === 1) {
+            const interrupted = context.interruptedTurnIds.delete(turnId);
+            context.session = {
+              ...context.session,
+              status: "ready",
+              activeTurnId: undefined,
+              updatedAt: yield* nowIso,
+              model,
+            };
+            context.activeTurnId = undefined;
+            yield* publish({
+              type: "turn.completed",
+              ...(yield* nextEventStamp()),
+              provider: PROVIDER,
+              threadId: input.threadId,
+              turnId,
+              payload: {
+                state: interrupted || result.stopReason === "cancelled" ? "cancelled" : "completed",
+                stopReason: result.stopReason ?? null,
+              },
+            });
+          }
+          return { threadId: input.threadId, turnId, resumeCursor: context.session.resumeCursor };
+        }).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              context.promptsInFlight = Math.max(0, context.promptsInFlight - 1);
+            }),
+          ),
+        );
+      });
+
+    const interruptTurn: KimiAdapterShape["interruptTurn"] = (threadId, turnId) =>
+      Effect.gen(function* () {
+        const context = yield* requireSession(threadId);
+        const activeTurnId = turnId ?? context.activeTurnId;
+        if (activeTurnId) context.interruptedTurnIds.add(activeTurnId);
+        yield* settleApprovals(context.pendingApprovals);
+        yield* Effect.ignore(
+          context.acp.cancel.pipe(
+            Effect.mapError((cause) =>
+              mapAcpToAdapterError(PROVIDER, threadId, "session/cancel", cause),
+            ),
+          ),
+        );
+      });
+    const respondToRequest: KimiAdapterShape["respondToRequest"] = (
+      threadId,
+      requestId,
+      decision,
+    ) =>
+      Effect.gen(function* () {
+        const context = yield* requireSession(threadId);
+        const pending = context.pendingApprovals.get(requestId);
+        if (!pending)
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "session/request_permission",
+            detail: `Unknown pending approval request: ${requestId}`,
+          });
+        yield* Deferred.succeed(pending.decision, decision);
+      });
+    const respondToUserInput: KimiAdapterShape["respondToUserInput"] = (
+      threadId,
+      requestId,
+      _answers,
+    ) =>
+      Effect.gen(function* () {
+        yield* requireSession(threadId);
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "session/elicitation",
+          detail: `Unknown pending user-input request: ${requestId}`,
+        });
+      });
+    const readThread: KimiAdapterShape["readThread"] = (threadId) =>
+      Effect.map(requireSession(threadId), (context) => ({
+        threadId,
+        turns: context.turns.map((turn) => ({ id: turn.id, items: [...turn.items] })),
+      }));
+    const rollbackThread: KimiAdapterShape["rollbackThread"] = (threadId, numTurns) =>
+      Effect.gen(function* () {
+        if (!Number.isInteger(numTurns) || numTurns < 1)
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "rollbackThread",
+            issue: "numTurns must be an integer >= 1.",
+          });
+        yield* requireSession(threadId);
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "rollbackThread",
+          detail: "Kimi ACP sessions do not support provider-side rollback.",
+        });
+      });
+    const stopSession: KimiAdapterShape["stopSession"] = (threadId) =>
+      withThreadLock(threadId, Effect.flatMap(requireSession(threadId), stopSessionInternal));
+    const listSessions: KimiAdapterShape["listSessions"] = () =>
+      Effect.sync(() => Array.from(sessions.values(), (context) => ({ ...context.session })));
+    const hasSession: KimiAdapterShape["hasSession"] = (threadId) =>
+      Effect.sync(() => {
+        const context = sessions.get(threadId);
+        return context !== undefined && !context.stopped;
+      });
+    const stopAll: KimiAdapterShape["stopAll"] = () =>
+      Effect.forEach(Array.from(sessions.values()), stopSessionInternal, { discard: true });
+
+    yield* Effect.addFinalizer(() =>
+      stopAll().pipe(
+        Effect.catch(() => Effect.void),
+        Effect.andThen(PubSub.shutdown(runtimeEvents)),
+      ),
+    );
+    return {
+      provider: PROVIDER,
+      capabilities: { sessionModelSwitch: "in-session" },
+      startSession,
+      sendTurn,
+      interruptTurn,
+      respondToRequest,
+      respondToUserInput,
+      stopSession,
+      listSessions,
+      hasSession,
+      readThread,
+      rollbackThread,
+      stopAll,
+      streamEvents: Stream.fromPubSub(runtimeEvents),
+    } satisfies KimiAdapterShape;
+  });
+}
