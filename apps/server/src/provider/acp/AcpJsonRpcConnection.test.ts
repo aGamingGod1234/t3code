@@ -116,6 +116,64 @@ describe("AcpSessionRuntime", () => {
     ),
   );
 
+  it.effect("replaces available command snapshots while preserving update events", () =>
+    Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+      yield* runtime.start();
+
+      yield* runtime.prompt({
+        prompt: [{ type: "text", text: "show commands" }],
+      });
+
+      const events = Array.from(yield* Stream.runCollect(Stream.take(runtime.getEvents(), 2)));
+      expect(events).toEqual([
+        {
+          _tag: "AvailableCommandsChanged",
+          commands: [
+            {
+              name: "skill:review",
+              description: "Review the current change",
+              input: { hint: "scope" },
+            },
+          ],
+        },
+        {
+          _tag: "AvailableCommandsChanged",
+          commands: [
+            {
+              name: "skill:ship",
+              description: "Prepare the current change for delivery",
+            },
+          ],
+        },
+      ]);
+      const commands = yield* runtime.getAvailableCommands;
+      expect(commands).toEqual([
+        {
+          name: "skill:ship",
+          description: "Prepare the current change for delivery",
+        },
+      ]);
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          spawn: {
+            command: mockAgentCommand,
+            args: mockAgentArgs,
+            env: {
+              T3_ACP_EMIT_AVAILABLE_COMMAND_UPDATES: "1",
+            },
+          },
+          cwd: process.cwd(),
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+          authMethodId: "test",
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    ),
+  );
+
   it.effect("keeps assistant item IDs unique when a provider session restarts", () => {
     const collectFirstAssistantItemId = Effect.gen(function* () {
       const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
