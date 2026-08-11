@@ -27,6 +27,8 @@ const emitForeignSessionUpdates = process.env.T3_ACP_EMIT_FOREIGN_SESSION_UPDATE
 const hangPromptForever = process.env.T3_ACP_HANG_PROMPT_FOREVER === "1";
 const hangFirstPromptForever = process.env.T3_ACP_HANG_FIRST_PROMPT_FOREVER === "1";
 const emitLateUpdateAfterCancel = process.env.T3_ACP_EMIT_LATE_UPDATE_AFTER_CANCEL === "1";
+const omitCodeMode = process.env.T3_ACP_OMIT_CODE_MODE === "1";
+const omitModelConfig = process.env.T3_ACP_OMIT_MODEL_CONFIG === "1";
 const omitXAiPromptCompleteStopReason =
   process.env.T3_ACP_OMIT_XAI_PROMPT_COMPLETE_STOP_REASON === "1";
 const failLoadSession = process.env.T3_ACP_FAIL_LOAD_SESSION === "1";
@@ -42,6 +44,7 @@ const emitOverlappingXAiPromptCompleteOutOfOrder =
   process.env.T3_ACP_EMIT_OVERLAPPING_XAI_PROMPT_COMPLETE_OUT_OF_ORDER === "1";
 const failPrompt = process.env.T3_ACP_FAIL_PROMPT === "1";
 const failSetConfigOption = process.env.T3_ACP_FAIL_SET_CONFIG_OPTION === "1";
+const setConfigOptionDelayMs = Number(process.env.T3_ACP_SET_CONFIG_OPTION_DELAY_MS ?? "0");
 const exitOnSetConfigOption = process.env.T3_ACP_EXIT_ON_SET_CONFIG_OPTION === "1";
 const promptResponseText = process.env.T3_ACP_PROMPT_RESPONSE_TEXT;
 const promptDelayMs = Number(process.env.T3_ACP_PROMPT_DELAY_MS ?? "0");
@@ -212,21 +215,23 @@ function configOptions(): ReadonlyArray<AcpSchema.SessionConfigOption> {
     }
   }
 
-  return [
-    {
-      id: "model",
-      name: "Model",
-      category: "model",
-      type: "select" as const,
-      currentValue: currentModelId,
-      options: [
-        { value: "default", name: "Auto" },
-        { value: "composer-2", name: "Composer 2" },
-        { value: "composer-2[fast=true]", name: "Composer 2 Fast" },
-        { value: "gpt-5.3-codex[reasoning=medium,fast=false]", name: "Codex 5.3" },
-      ],
-    },
-  ];
+  return omitModelConfig
+    ? []
+    : [
+        {
+          id: "model",
+          name: "Model",
+          category: "model",
+          type: "select" as const,
+          currentValue: currentModelId,
+          options: [
+            { value: "default", name: "Auto" },
+            { value: "composer-2", name: "Composer 2" },
+            { value: "composer-2[fast=true]", name: "Composer 2 Fast" },
+            { value: "gpt-5.3-codex[reasoning=medium,fast=false]", name: "Codex 5.3" },
+          ],
+        },
+      ];
 }
 
 function modelConfigOptionsFor(modelId: string): ReadonlyArray<AcpSchema.SessionConfigOption> {
@@ -274,7 +279,7 @@ const availableModes: ReadonlyArray<AcpSchema.SessionMode> = [
     name: "Code",
     description: "Write and modify code with full tool access",
   },
-];
+].filter((mode) => !omitCodeMode || mode.id !== "code");
 
 function modeState(): AcpSchema.SessionModeState {
   return {
@@ -412,6 +417,9 @@ const program = Effect.gen(function* () {
 
   yield* agent.handleSetSessionConfigOption((request) =>
     Effect.gen(function* () {
+      if (Number.isFinite(setConfigOptionDelayMs) && setConfigOptionDelayMs > 0) {
+        yield* Effect.sleep(`${setConfigOptionDelayMs} millis`);
+      }
       if (exitOnSetConfigOption) {
         return yield* Effect.sync(() => {
           process.exit(7);

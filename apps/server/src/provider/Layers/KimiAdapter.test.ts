@@ -18,6 +18,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
+  TurnId,
   type ProviderRuntimeEvent,
 } from "@t3tools/contracts";
 
@@ -125,6 +126,10 @@ it.layer(kimiAdapterTestLayer)("KimiAdapter", (it) => {
         attachments: [],
       });
       assert.equal(turn.threadId, threadId);
+      assert.include(
+        events.map((event) => event.type),
+        "item.completed",
+      );
       yield* Deferred.await(completed);
       yield* Deferred.await(assistantCompleted);
       yield* Fiber.interrupt(eventsFiber);
@@ -142,6 +147,104 @@ it.layer(kimiAdapterTestLayer)("KimiAdapter", (it) => {
         );
       }
       assert.isTrue(events.every((event) => event.provider === ProviderDriverKind.make("kimi")));
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("does not start an ACP prompt when interruption wins during turn setup", () =>
+    Effect.gen(function* () {
+      const directory = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "kimi-acp-interrupt-")),
+      );
+      const requestLogPath = NodePath.join(directory, "requests.ndjson");
+      const adapter = yield* makeTestAdapter(
+        yield* Effect.promise(() =>
+          makeKimiWrapper({
+            T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+            T3_ACP_SET_CONFIG_OPTION_DELAY_MS: "100",
+          }),
+        ),
+      );
+      const threadId = ThreadId.make("kimi-interrupt-setup");
+      const started = yield* Deferred.make<TurnId>();
+      const completed = yield* Deferred.make<void>();
+      const eventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        event.threadId !== threadId
+          ? Effect.void
+          : event.type === "turn.started" && event.turnId
+            ? Deferred.succeed(started, event.turnId).pipe(Effect.asVoid)
+            : event.type === "turn.completed"
+              ? Deferred.succeed(completed, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("kimi"),
+        cwd: process.cwd(),
+        runtimeMode: "approval-required",
+      });
+      const turnFiber = yield* adapter
+        .sendTurn({
+          threadId,
+          input: "Do not prompt after cancellation",
+          attachments: [],
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("kimi"),
+            model: "composer-2",
+          },
+        })
+        .pipe(Effect.forkChild);
+      const turnId = yield* Deferred.await(started);
+      yield* adapter.interruptTurn(threadId, turnId);
+      yield* Fiber.join(turnFiber);
+      yield* Deferred.await(completed);
+
+      assert.notInclude(
+        yield* Effect.promise(() => readRequestMethods(requestLogPath)),
+        "session/prompt",
+      );
+      yield* Fiber.interrupt(eventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("leaves plan mode when a specialized full-access mode is unavailable", () =>
+    Effect.gen(function* () {
+      const directory = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "kimi-acp-mode-fallback-")),
+      );
+      const requestLogPath = NodePath.join(directory, "requests.ndjson");
+      const adapter = yield* makeTestAdapter(
+        yield* Effect.promise(() =>
+          makeKimiWrapper({
+            T3_ACP_OMIT_CODE_MODE: "1",
+            T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+          }),
+        ),
+      );
+      const threadId = ThreadId.make("kimi-mode-fallback");
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("kimi"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "Plan first",
+        attachments: [],
+        interactionMode: "plan",
+      });
+      yield* adapter.sendTurn({ threadId, input: "Now implement", attachments: [] });
+
+      const modeValues = (yield* Effect.promise(() => readRequests(requestLogPath)))
+        .filter(
+          (entry) =>
+            entry.method === "session/set_config_option" && entry.params?.configId === "mode",
+        )
+        .map((entry) => entry.params?.value);
+      assert.deepStrictEqual(modeValues, ["architect", "ask"]);
       yield* adapter.stopSession(threadId);
     }),
   );

@@ -89,7 +89,7 @@ export const KimiDriver: ProviderDriver<KimiSettings, KimiDriverEnv> = {
       );
       const continuationIdentity = {
         driverKind: DRIVER_KIND,
-        continuationKey: yield* makeKimiContinuationGroupKey(effectiveConfig),
+        continuationKey: yield* makeKimiContinuationGroupKey(effectiveConfig, processEnvironment),
       };
       const stampIdentity = withInstanceIdentity({
         instanceId,

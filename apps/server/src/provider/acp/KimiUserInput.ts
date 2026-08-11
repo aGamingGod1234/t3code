@@ -83,7 +83,11 @@ export function extractKimiPermissionQuestions(
   }
 
   const rawQuestions = extractKimiUserQuestions(request.toolCall.rawInput);
-  if (rawQuestions) return rawQuestions;
+  if (rawQuestions) {
+    // Kimi's ACP bridge can return only one permission option, so mirror the
+    // CLI's first-question, single-select behavior for legacy raw input.
+    return [{ ...rawQuestions[0]!, multiSelect: false }];
+  }
 
   const question = toolCallQuestionText(request);
   const options = request.options.flatMap((entry) => {
@@ -123,8 +127,10 @@ export function resolveKimiQuestionPermissionOption(input: {
     selectedLabels(input.answers[question.id] ?? input.answers[question.question]),
   );
   for (const label of labels) {
+    const normalizedLabel = text(label);
+    if (!normalizedLabel) continue;
     const option = input.request.options.find(
-      (entry) => entry.kind === "allow_once" && entry.name === label,
+      (entry) => entry.kind === "allow_once" && text(entry.name) === normalizedLabel,
     );
     if (option?.optionId.trim()) return option.optionId.trim();
   }

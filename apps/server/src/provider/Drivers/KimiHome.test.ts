@@ -43,4 +43,31 @@ it.layer(NodeServices.layer)("KimiHome", (it) => {
       );
     }),
   );
+
+  it.effect("uses the child environment for Kimi's implicit home and continuation identity", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const environment = { HOME: path.resolve("/isolated-user") };
+      const resolvedHome = path.resolve(environment.HOME, ".kimi-code");
+
+      expect(yield* resolveKimiHomePath({ homePath: "" }, environment)).toBe(resolvedHome);
+      expect(yield* makeKimiContinuationGroupKey({ homePath: "" }, environment)).toBe(
+        `kimi:home:${resolvedHome}`,
+      );
+    }),
+  );
+
+  it.effect("honors an inherited KIMI_CODE_HOME when no explicit home is configured", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const environment = {
+        HOME: path.resolve("/isolated-user"),
+        KIMI_CODE_HOME: "~/.kimi-from-env",
+      };
+      const resolvedHome = path.resolve(environment.HOME, ".kimi-from-env");
+
+      expect(yield* resolveKimiHomePath({ homePath: "" }, environment)).toBe(resolvedHome);
+      expect(yield* makeKimiEnvironment({ homePath: "" }, environment)).toBe(environment);
+    }),
+  );
 });

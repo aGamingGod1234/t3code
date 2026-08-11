@@ -48,9 +48,17 @@ async function makeKimiFixture(mode: KimiFixtureMode): Promise<string> {
     `import * as readline from "node:readline";
 
 const mode = process.env.T3_KIMI_FIXTURE_MODE;
+let currentModel = "kimi-k2";
 const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n");
 const fail = (id, code, message) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } }) + "\\n");
 const notify = (method, params) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", method, params }) + "\\n");
+const configOptions = () => [
+  { id: "model", name: "Model", category: "model", type: "select", currentValue: currentModel, options: [{ value: "kimi-k2", name: "Kimi K2" }, { value: "kimi-k2-thinking", name: "Kimi K2 Thinking" }] },
+  { id: "mode", name: "Mode", category: "mode", type: "select", currentValue: "default", options: [{ value: "default", name: "Default" }, { value: "plan", name: "Plan" }] },
+  ...(currentModel === "kimi-k2-thinking"
+    ? [{ id: "reasoning", name: "Reasoning", category: "model_config", type: "select", currentValue: "high", options: [{ value: "low", name: "Low" }, { value: "high", name: "High" }] }]
+    : [{ id: "thinking", name: "Thinking", category: "model_config", type: "boolean", currentValue: true }])
+];
 
 for await (const line of readline.createInterface({ input: process.stdin })) {
   const request = JSON.parse(line);
@@ -76,17 +84,13 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
         ]
       },
       models: {
-        currentModelId: "kimi-k2",
+        currentModelId: currentModel,
         availableModels: [
           { modelId: "kimi-k2", name: "Kimi K2" },
           { modelId: "kimi-k2-thinking", name: "Kimi K2 Thinking" }
         ]
       },
-      configOptions: [
-        { id: "model", name: "Model", category: "model", type: "select", currentValue: "kimi-k2", options: [{ value: "kimi-k2", name: "Kimi K2" }] },
-        { id: "mode", name: "Mode", category: "mode", type: "select", currentValue: "default", options: [{ value: "default", name: "Default" }, { value: "plan", name: "Plan" }] },
-        { id: "thinking", name: "Thinking", category: "model_config", type: "boolean", currentValue: true }
-      ]
+      configOptions: configOptions()
     });
     notify("session/update", {
       sessionId: "kimi-fixture-session",
@@ -98,6 +102,12 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
         ]
       }
     });
+    continue;
+  }
+  if (request.method === "session/set_config_option") {
+    if (request.params.configId === "model") currentModel = request.params.value;
+    reply(request.id, { configOptions: configOptions() });
+    continue;
   }
 }
 `,
@@ -243,6 +253,20 @@ describe("checkKimiProviderStatus", () => {
     expect(snapshot.models[0]?.capabilities).toEqual({
       optionDescriptors: [
         { id: "thinking", label: "Thinking", type: "boolean", currentValue: true },
+      ],
+    });
+    expect(snapshot.models[1]?.capabilities).toEqual({
+      optionDescriptors: [
+        {
+          id: "reasoning",
+          label: "Reasoning",
+          type: "select",
+          currentValue: "high",
+          options: [
+            { id: "low", label: "Low" },
+            { id: "high", label: "High", isDefault: true },
+          ],
+        },
       ],
     });
     expect(snapshot.slashCommands).toEqual([

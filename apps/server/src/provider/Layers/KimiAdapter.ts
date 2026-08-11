@@ -155,20 +155,24 @@ function requestedKimiModeId(input: {
   if (input.interactionMode === "plan") {
     return findKimiMode(input.modeState, ["plan", "architect"]);
   }
-  if (input.runtimeMode === "auto") return findKimiMode(input.modeState, ["auto"]);
+  if (input.runtimeMode === "auto") {
+    return (
+      findKimiMode(input.modeState, ["auto"]) ?? findKimiMode(input.modeState, ["default", "ask"])
+    );
+  }
   if (input.runtimeMode === "full-access") {
-    return findKimiMode(input.modeState, ["yolo", "code"]);
+    return (
+      findKimiMode(input.modeState, ["yolo", "code"]) ??
+      findKimiMode(input.modeState, ["default", "ask"])
+    );
   }
   return findKimiMode(input.modeState, ["default", "ask"]);
 }
 
-function initializedPromptSupportsImages(initializeResult: unknown): boolean {
-  const capabilities = (
-    initializeResult as {
-      readonly agentCapabilities?: { readonly promptCapabilities?: { readonly image?: boolean } };
-    }
-  ).agentCapabilities;
-  return capabilities?.promptCapabilities?.image === true;
+function initializedPromptSupportsImages(
+  initializeResult: EffectAcpSchema.InitializeResponse,
+): boolean {
+  return initializeResult.agentCapabilities?.promptCapabilities?.image === true;
 }
 
 export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapterLiveOptions) {
@@ -574,7 +578,7 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
             ),
           ).pipe(
             Effect.catch(() => Effect.void),
-            Effect.forkChild,
+            Effect.forkIn(ownedContext.scope),
           );
           sessions.set(input.threadId, ownedContext);
           transferred = true;
@@ -613,6 +617,23 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
           const selection =
             input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;
           const model = selection?.model ?? context.session.model;
+          context.activeTurnId = turnId;
+          context.session = {
+            ...context.session,
+            status: "running",
+            activeTurnId: turnId,
+            updatedAt: yield* nowIso,
+          };
+          if (!steeringTurnId) {
+            yield* publish({
+              type: "turn.started",
+              ...(yield* nextEventStamp()),
+              provider: PROVIDER,
+              threadId: input.threadId,
+              turnId,
+              payload: { model },
+            });
+          }
           yield* applyKimiAcpModelSelection({
             runtime: context.acp,
             model,
@@ -628,24 +649,11 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
             interactionMode: input.interactionMode,
             threadId: input.threadId,
           });
-          context.activeTurnId = turnId;
           context.session = {
             ...context.session,
-            status: "running",
-            activeTurnId: turnId,
             updatedAt: yield* nowIso,
             model,
           };
-          if (!steeringTurnId) {
-            yield* publish({
-              type: "turn.started",
-              ...(yield* nextEventStamp()),
-              provider: PROVIDER,
-              threadId: input.threadId,
-              turnId,
-              payload: { model },
-            });
-          }
           const prompt: Array<EffectAcpSchema.ContentBlock> = [];
           if (input.input?.trim()) prompt.push({ type: "text", text: input.input.trim() });
           for (const attachment of input.attachments ?? []) {
@@ -688,6 +696,27 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
               issue: "Turn requires non-empty text or attachments.",
             });
           }
+          if (context.interruptedTurnIds.has(turnId)) {
+            if (context.promptsInFlight === 1) {
+              context.interruptedTurnIds.delete(turnId);
+              context.session = {
+                ...context.session,
+                status: "ready",
+                activeTurnId: undefined,
+                updatedAt: yield* nowIso,
+              };
+              context.activeTurnId = undefined;
+              yield* publish({
+                type: "turn.completed",
+                ...(yield* nextEventStamp()),
+                provider: PROVIDER,
+                threadId: input.threadId,
+                turnId,
+                payload: { state: "cancelled", stopReason: null },
+              });
+            }
+            return { threadId: input.threadId, turnId, resumeCursor: context.session.resumeCursor };
+          }
           const result = yield* context.acp
             .prompt({ prompt })
             .pipe(
@@ -695,6 +724,7 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
                 mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", cause),
               ),
             );
+          yield* context.acp.drainEvents;
           if (
             sessions.get(input.threadId) !== context ||
             context.stopped ||
@@ -729,6 +759,29 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
           }
           return { threadId: input.threadId, turnId, resumeCursor: context.session.resumeCursor };
         }).pipe(
+          Effect.onError(() =>
+            (context.promptsInFlight === 1 && context.activeTurnId === turnId
+              ? Effect.gen(function* () {
+                  context.interruptedTurnIds.delete(turnId);
+                  context.session = {
+                    ...context.session,
+                    status: "ready",
+                    activeTurnId: undefined,
+                    updatedAt: yield* nowIso,
+                  };
+                  context.activeTurnId = undefined;
+                  yield* publish({
+                    type: "turn.completed",
+                    ...(yield* nextEventStamp()),
+                    provider: PROVIDER,
+                    threadId: input.threadId,
+                    turnId,
+                    payload: { state: "failed", stopReason: null },
+                  });
+                })
+              : Effect.void
+            ).pipe(Effect.ignore),
+          ),
           Effect.ensuring(
             Effect.sync(() => {
               context.promptsInFlight = Math.max(0, context.promptsInFlight - 1);

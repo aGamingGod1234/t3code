@@ -141,6 +141,7 @@ function ModelRow(props: {
 function ProviderHeader(props: {
   readonly driver: string | undefined;
   readonly label: string;
+  readonly badgeLabel: string | undefined;
   readonly collapsible: boolean;
   readonly collapsed: boolean;
   readonly modelCount: number;
@@ -165,6 +166,11 @@ function ProviderHeader(props: {
       <Text className="text-2xs font-t3-bold uppercase tracking-widest text-foreground-muted">
         {props.label}
       </Text>
+      {props.badgeLabel ? (
+        <Text className="rounded-full bg-surface-raised px-2 py-0.5 text-3xs font-t3-medium uppercase text-foreground-muted">
+          {props.badgeLabel}
+        </Text>
+      ) : null}
       {props.collapsible ? (
         <>
           <View className="flex-1" />
@@ -548,6 +554,7 @@ export function ThreadSettingsSheet(props: {
                   <ProviderHeader
                     driver={driver}
                     label={group.providerLabel}
+                    badgeLabel={group.providerBadgeLabel}
                     collapsible={collapsible}
                     collapsed={collapsed}
                     modelCount={visibleModels.length}

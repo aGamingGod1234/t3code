@@ -536,6 +536,23 @@ export const make = (
         ),
       );
 
+    const setSessionModel = (
+      modelId: string,
+    ): Effect.Effect<EffectAcpSchema.SetSessionModelResponse, EffectAcpErrors.AcpError> =>
+      getStartedState.pipe(
+        Effect.flatMap((started) => {
+          const requestPayload = {
+            sessionId: started.sessionId,
+            modelId,
+          } satisfies EffectAcpSchema.SetSessionModelRequest;
+          return runLoggedRequest(
+            "session/set_model",
+            requestPayload,
+            acp.agent.setSessionModel(requestPayload),
+          );
+        }),
+      );
+
     const startOnce = Effect.gen(function* () {
       const initializePayload = {
         protocolVersion: 1,
@@ -850,23 +867,21 @@ export const make = (
       setConfigOption,
       setModel: (model) =>
         getStartedState.pipe(
-          Effect.flatMap((started) => setConfigOption(started.modelConfigId ?? "model", model)),
+          Effect.flatMap((started) =>
+            started.modelConfigId
+              ? setConfigOption(started.modelConfigId, model)
+              : started.sessionSetupResult.models
+                ? setSessionModel(model)
+                : Effect.fail(
+                    new EffectAcpErrors.AcpRequestError({
+                      code: -32601,
+                      errorMessage: "ACP agent does not advertise a writable model selector",
+                    }),
+                  ),
+          ),
           Effect.asVoid,
         ),
-      setSessionModel: (modelId) =>
-        getStartedState.pipe(
-          Effect.flatMap((started) => {
-            const requestPayload = {
-              sessionId: started.sessionId,
-              modelId,
-            } satisfies EffectAcpSchema.SetSessionModelRequest;
-            return runLoggedRequest(
-              "session/set_model",
-              requestPayload,
-              acp.agent.setSessionModel(requestPayload),
-            );
-          }),
-        ),
+      setSessionModel,
       request: (method, payload) =>
         runLoggedRequest(method, payload, acp.raw.request(method, payload)),
       notify: acp.raw.notify,

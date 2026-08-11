@@ -5,6 +5,14 @@ import { describe, expect, it } from "vite-plus/test";
 import { applyKimiAcpModelSelection, buildKimiAcpSpawnInput } from "./KimiAcpSupport.ts";
 
 describe("buildKimiAcpSpawnInput", () => {
+  it.each([null, undefined])("uses the default Kimi ACP command for %s settings", (settings) => {
+    expect(buildKimiAcpSpawnInput(settings, "/repo")).toEqual({
+      command: "kimi",
+      args: ["acp"],
+      cwd: "/repo",
+    });
+  });
+
   it("puts tokenized global launch arguments before the Kimi ACP subcommand", () => {
     expect(
       buildKimiAcpSpawnInput(

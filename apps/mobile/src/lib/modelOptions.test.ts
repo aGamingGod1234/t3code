@@ -16,6 +16,7 @@ describe("mobile model options", () => {
         {
           instanceId: "kimi",
           driver: "kimi",
+          badgeLabel: "Early Access",
           enabled: true,
           installed: true,
           auth: { status: "authenticated" },
@@ -31,7 +32,11 @@ describe("mobile model options", () => {
       ],
     } as unknown as ServerConfig;
 
-    expect(groupByProvider(buildModelOptions(config, null))[0]?.providerLabel).toBe("Kimi");
+    expect(groupByProvider(buildModelOptions(config, null))[0]).toMatchObject({
+      providerLabel: "Kimi",
+      providerBadgeLabel: "Early Access",
+      models: [{ providerBadgeLabel: "Early Access" }],
+    });
   });
 
   it("groups models by provider and flags legacy entries", () => {

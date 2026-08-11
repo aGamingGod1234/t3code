@@ -57,6 +57,7 @@ interface KimiAcpDiscovery {
   readonly currentModelId: string | undefined;
   readonly availableModels: ReadonlyArray<EffectAcpSchema.ModelInfo>;
   readonly configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption>;
+  readonly capabilitiesByModel: ReadonlyMap<string, ModelCapabilities>;
   readonly commands: ReadonlyArray<EffectAcpSchema.AvailableCommand>;
 }
 
@@ -156,7 +157,7 @@ function getKimiFallbackModels(
 function discoveredKimiModels(input: {
   readonly currentModelId: string | undefined;
   readonly availableModels: ReadonlyArray<EffectAcpSchema.ModelInfo>;
-  readonly capabilities: ModelCapabilities;
+  readonly capabilitiesByModel: ReadonlyMap<string, ModelCapabilities>;
 }): ReadonlyArray<ServerProviderModel> {
   const currentModelId = input.currentModelId?.trim();
   const seen = new Set<string>();
@@ -172,7 +173,7 @@ function discoveredKimiModels(input: {
         name: model.name.trim() || slug,
         isCustom: false,
         ...(currentModelId === slug ? { isDefault: true } : {}),
-        capabilities: input.capabilities,
+        capabilities: input.capabilitiesByModel.get(slug) ?? EMPTY_CAPABILITIES,
       } satisfies ServerProviderModel,
     ];
   });
@@ -246,10 +247,37 @@ const discoverKimiViaAcp = (
     );
     const started = yield* runtime.start();
     yield* runtime.drainEvents;
+    const currentModelId = started.sessionSetupResult.models?.currentModelId?.trim() || undefined;
+    const availableModels = started.sessionSetupResult.models?.availableModels ?? [];
+    const initialConfigOptions = yield* runtime.getConfigOptions;
+    const capabilitiesByModel = new Map<string, ModelCapabilities>();
+    for (const model of availableModels) {
+      const modelId = model.modelId.trim();
+      if (!modelId) continue;
+      if (modelId === currentModelId) {
+        capabilitiesByModel.set(
+          modelId,
+          kimiModelCapabilitiesFromConfigOptions(initialConfigOptions),
+        );
+        continue;
+      }
+      const modelConfigOptions = yield* runtime.setModel(modelId).pipe(
+        Effect.andThen(runtime.getConfigOptions),
+        Effect.orElseSucceed((): ReadonlyArray<EffectAcpSchema.SessionConfigOption> => []),
+      );
+      capabilitiesByModel.set(modelId, kimiModelCapabilitiesFromConfigOptions(modelConfigOptions));
+    }
+    if (
+      currentModelId &&
+      availableModels.some((model) => model.modelId.trim() === currentModelId)
+    ) {
+      yield* runtime.setModel(currentModelId).pipe(Effect.ignore);
+    }
     return {
-      currentModelId: started.sessionSetupResult.models?.currentModelId?.trim() || undefined,
-      availableModels: started.sessionSetupResult.models?.availableModels ?? [],
-      configOptions: yield* runtime.getConfigOptions,
+      currentModelId,
+      availableModels,
+      configOptions: initialConfigOptions,
+      capabilitiesByModel,
       commands: yield* runtime.getAvailableCommands,
     } satisfies KimiAcpDiscovery;
   }).pipe(Effect.scoped);
@@ -435,9 +463,13 @@ export const checkKimiProviderStatus = Effect.fn("checkKimiProviderStatus")(func
     });
   }
   const discovery = discoveryExit.value.value;
-  const capabilities = kimiModelCapabilitiesFromConfigOptions(discovery.configOptions);
-  const discoveredModels = discoveredKimiModels({ ...discovery, capabilities });
-  const models = providerModelsFromSettings(discoveredModels, settings.customModels, capabilities);
+  const customModelCapabilities = kimiModelCapabilitiesFromConfigOptions(discovery.configOptions);
+  const discoveredModels = discoveredKimiModels(discovery);
+  const models = providerModelsFromSettings(
+    discoveredModels,
+    settings.customModels,
+    customModelCapabilities,
+  );
   const skills = yield* discoverKimiSkills(settings, cwd, environment);
   return buildServerProvider({
     presentation: KIMI_PRESENTATION,

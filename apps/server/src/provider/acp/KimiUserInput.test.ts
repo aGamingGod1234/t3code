@@ -113,11 +113,75 @@ describe("Kimi ACP question permissions", () => {
     ]);
   });
 
+  it("matches Kimi's single-choice ACP bridge for legacy raw question input", () => {
+    expect(
+      extractKimiPermissionQuestions({
+        ...request,
+        toolCall: {
+          ...request.toolCall,
+          rawInput: {
+            questions: [
+              {
+                id: "framework",
+                header: "Framework",
+                question: "Which framework?",
+                options: ["React", "Vue"],
+                multiSelect: true,
+              },
+              {
+                id: "database",
+                header: "Database",
+                question: "Which database?",
+                options: ["Postgres", "SQLite"],
+              },
+            ],
+          },
+        },
+      }),
+    ).toEqual([
+      {
+        id: "framework",
+        header: "Framework",
+        question: "Which framework?",
+        options: [
+          { label: "React", description: "React" },
+          { label: "Vue", description: "Vue" },
+        ],
+        multiSelect: false,
+      },
+    ]);
+  });
+
   it("round-trips the selected label to Kimi's opaque ACP option id", () => {
     const questions = extractKimiPermissionQuestions(request) ?? [];
     expect(
       resolveKimiQuestionPermissionOption({
         request,
+        questions,
+        answers: { "ask-1": "Vue" },
+      }),
+    ).toBe("q0_opt_1");
+  });
+
+  it.each([{ "ask-1": ["Vue"] }, { "ask-1": { answers: ["Vue"] } }, { "ask-1": " Vue " }])(
+    "accepts supported answer payload shapes %#",
+    (answers) => {
+      const questions = extractKimiPermissionQuestions(request) ?? [];
+      expect(resolveKimiQuestionPermissionOption({ request, questions, answers })).toBe("q0_opt_1");
+    },
+  );
+
+  it("trims permission option names before matching", () => {
+    const spacedRequest = {
+      ...request,
+      options: request.options.map((entry) =>
+        entry.optionId === "q0_opt_1" ? { ...entry, name: "  Vue  " } : entry,
+      ),
+    };
+    const questions = extractKimiPermissionQuestions(spacedRequest) ?? [];
+    expect(
+      resolveKimiQuestionPermissionOption({
+        request: spacedRequest,
         questions,
         answers: { "ask-1": "Vue" },
       }),

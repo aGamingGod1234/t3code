@@ -526,6 +526,44 @@ describe("AcpSessionRuntime", () => {
     );
   });
 
+  it.effect("uses standard ACP model switching when no model config option is advertised", () => {
+    const requestEvents: Array<AcpSessionRuntime.AcpSessionRequestLogEvent> = [];
+    return Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+      yield* runtime.start();
+
+      yield* runtime.setModel("grok-mock-alt");
+
+      expect(
+        requestEvents.some(
+          (event) => event.method === "session/set_model" && event.status === "succeeded",
+        ),
+      ).toBe(true);
+      expect(requestEvents.some((event) => event.method === "session/set_config_option")).toBe(
+        false,
+      );
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          authMethodId: "test",
+          spawn: {
+            command: mockAgentCommand,
+            args: mockAgentArgs,
+            env: { T3_ACP_OMIT_MODEL_CONFIG: "1" },
+          },
+          cwd: process.cwd(),
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+          requestLogger: (event) =>
+            Effect.sync(() => {
+              requestEvents.push(event);
+            }),
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    );
+  });
+
   it.effect("skips no-op session config writes when the requested value is already active", () => {
     const requestEvents: Array<AcpSessionRuntime.AcpSessionRequestLogEvent> = [];
     return Effect.gen(function* () {
