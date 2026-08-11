@@ -61,6 +61,8 @@ export interface AcpSessionRuntimeOptions {
   readonly spawn: AcpSpawnInput;
   readonly cwd: string;
   readonly resumeSessionId?: string;
+  /** Prefer ACP's lightweight session/resume method, then fall back to session/load. */
+  readonly resumeStrategy?: "load" | "resume-first";
   readonly sessionLoadTimeout?: Duration.Input;
   readonly sessionLoadReplayIdleGap?: Duration.Input;
   readonly clientCapabilities?: EffectAcpSchema.InitializeRequest["clientCapabilities"];
@@ -562,6 +564,47 @@ export const make = (
           cwd: options.cwd,
           mcpServers: options.mcpServers ?? [],
         } satisfies EffectAcpSchema.LoadSessionRequest;
+        const resumed =
+          options.resumeStrategy === "resume-first"
+            ? yield* Effect.gen(function* () {
+                yield* logRequest({
+                  method: "session/resume",
+                  payload: loadPayload,
+                  status: "started",
+                });
+                return yield* acp.agent.resumeSession(loadPayload).pipe(
+                  Effect.tap((result) =>
+                    logRequest({
+                      method: "session/resume",
+                      payload: loadPayload,
+                      status: "succeeded",
+                      result,
+                    }),
+                  ),
+                  Effect.catchCause((cause) =>
+                    logRequest({
+                      method: "session/resume",
+                      payload: loadPayload,
+                      status: "failed",
+                      cause,
+                    }).pipe(Effect.as(undefined)),
+                  ),
+                );
+              })
+            : undefined;
+        if (resumed) {
+          sessionId = options.resumeSessionId;
+          sessionSetupResult = resumed;
+          yield* Ref.set(modeStateRef, parseSessionModeState(sessionSetupResult));
+          yield* Ref.set(configOptionsRef, sessionConfigOptionsFromSetup(sessionSetupResult));
+          const nextState = {
+            sessionId,
+            initializeResult,
+            sessionSetupResult,
+            modelConfigId: extractModelConfigId(sessionSetupResult),
+          } satisfies AcpStartedState;
+          return nextState;
+        }
         const sessionLoadTimeout = Duration.fromInputUnsafe(
           options.sessionLoadTimeout ?? defaultSessionLoadTimeout,
         );
