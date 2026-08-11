@@ -1,4 +1,5 @@
-import type { UserInputQuestion } from "@t3tools/contracts";
+import type { ProviderUserInputAnswers, UserInputQuestion } from "@t3tools/contracts";
+import type * as EffectAcpSchema from "effect-acp/schema";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -55,4 +56,77 @@ export function extractKimiUserQuestions(
   }
 
   return questions;
+}
+
+function toolCallQuestionText(
+  request: EffectAcpSchema.RequestPermissionRequest,
+): string | undefined {
+  for (const entry of request.toolCall.content ?? []) {
+    if (entry.type === "content" && entry.content.type === "text") {
+      const value = text(entry.content.text);
+      if (value) return value;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Kimi Code bridges AskUserQuestion through ACP's permission request surface.
+ * Prefer its raw tool input when present, while also supporting the current
+ * upstream bridge that exposes only a title, question text, and named options.
+ */
+export function extractKimiPermissionQuestions(
+  request: EffectAcpSchema.RequestPermissionRequest,
+): ReadonlyArray<UserInputQuestion> | undefined {
+  if (request.toolCall.title?.trim().toLowerCase() !== "askuserquestion") {
+    return undefined;
+  }
+
+  const rawQuestions = extractKimiUserQuestions(request.toolCall.rawInput);
+  if (rawQuestions) return rawQuestions;
+
+  const question = toolCallQuestionText(request);
+  const options = request.options.flatMap((entry) => {
+    if (entry.kind !== "allow_once") return [];
+    const label = text(entry.name);
+    return label ? [{ label, description: label }] : [];
+  });
+  if (!question || options.length < 2) return undefined;
+
+  return [
+    {
+      id: text(request.toolCall.toolCallId) ?? "kimi-question-1-question",
+      header: "Question",
+      question,
+      options,
+      multiSelect: false,
+    },
+  ];
+}
+
+function selectedLabels(value: unknown): ReadonlyArray<string> {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value))
+    return value.filter((entry): entry is string => typeof entry === "string");
+  if (isRecord(value) && Array.isArray(value.answers)) {
+    return value.answers.filter((entry): entry is string => typeof entry === "string");
+  }
+  return [];
+}
+
+export function resolveKimiQuestionPermissionOption(input: {
+  readonly request: EffectAcpSchema.RequestPermissionRequest;
+  readonly questions: ReadonlyArray<UserInputQuestion>;
+  readonly answers: ProviderUserInputAnswers;
+}): string | undefined {
+  const labels = input.questions.flatMap((question) =>
+    selectedLabels(input.answers[question.id] ?? input.answers[question.question]),
+  );
+  for (const label of labels) {
+    const option = input.request.options.find(
+      (entry) => entry.kind === "allow_once" && entry.name === label,
+    );
+    if (option?.optionId.trim()) return option.optionId.trim();
+  }
+  return undefined;
 }

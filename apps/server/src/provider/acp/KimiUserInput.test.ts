@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { extractKimiUserQuestions } from "./KimiUserInput.ts";
+import {
+  extractKimiPermissionQuestions,
+  extractKimiUserQuestions,
+  resolveKimiQuestionPermissionOption,
+} from "./KimiUserInput.ts";
 
 describe("extractKimiUserQuestions", () => {
   it("parses Kimi AskUserQuestion input", () => {
@@ -71,5 +75,52 @@ describe("extractKimiUserQuestions", () => {
     { tool: "shell", input: { command: "pwd" } },
   ])("rejects malformed or non-question input %#", (input) => {
     expect(extractKimiUserQuestions(input)).toBeUndefined();
+  });
+});
+
+describe("Kimi ACP question permissions", () => {
+  const request = {
+    sessionId: "kimi-session",
+    toolCall: {
+      toolCallId: "ask-1",
+      title: "AskUserQuestion",
+      content: [
+        {
+          type: "content" as const,
+          content: { type: "text" as const, text: "Which framework should I use?" },
+        },
+      ],
+    },
+    options: [
+      { optionId: "q0_opt_0", name: "React", kind: "allow_once" as const },
+      { optionId: "q0_opt_1", name: "Vue", kind: "allow_once" as const },
+      { optionId: "q0_skip", name: "Skip", kind: "reject_once" as const },
+    ],
+  };
+
+  it("recognizes Kimi Code's permission-based question bridge", () => {
+    expect(extractKimiPermissionQuestions(request)).toEqual([
+      {
+        id: "ask-1",
+        header: "Question",
+        question: "Which framework should I use?",
+        options: [
+          { label: "React", description: "React" },
+          { label: "Vue", description: "Vue" },
+        ],
+        multiSelect: false,
+      },
+    ]);
+  });
+
+  it("round-trips the selected label to Kimi's opaque ACP option id", () => {
+    const questions = extractKimiPermissionQuestions(request) ?? [];
+    expect(
+      resolveKimiQuestionPermissionOption({
+        request,
+        questions,
+        answers: { "ask-1": "Vue" },
+      }),
+    ).toBe("q0_opt_1");
   });
 });

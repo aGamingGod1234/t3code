@@ -44,7 +44,7 @@ import {
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
 } from "../Errors.ts";
-import { acpPermissionOutcome, mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
+import { mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
 import {
   makeAcpAssistantItemEvent,
   makeAcpContentDeltaEvent,
@@ -54,7 +54,11 @@ import {
   makeAcpToolCallEvent,
 } from "../acp/AcpCoreRuntimeEvents.ts";
 import { applyKimiAcpModelSelection, makeKimiAcpRuntime } from "../acp/KimiAcpSupport.ts";
-import { parsePermissionRequest } from "../acp/AcpRuntimeModel.ts";
+import { parsePermissionRequest, type AcpSessionModeState } from "../acp/AcpRuntimeModel.ts";
+import {
+  extractKimiPermissionQuestions,
+  resolveKimiQuestionPermissionOption,
+} from "../acp/KimiUserInput.ts";
 import type * as AcpSessionRuntime from "../acp/AcpSessionRuntime.ts";
 import type { KimiAdapterShape } from "../Services/KimiAdapter.ts";
 
@@ -72,7 +76,11 @@ export interface KimiAdapterLiveOptions {
 
 interface PendingApproval {
   readonly decision: Deferred.Deferred<ProviderApprovalDecision>;
-  readonly permission: ReturnType<typeof parsePermissionRequest>;
+  readonly request: EffectAcpSchema.RequestPermissionRequest;
+}
+
+interface PendingUserInput {
+  readonly answers: Deferred.Deferred<ProviderUserInputAnswers>;
 }
 
 interface KimiSessionContext {
@@ -86,6 +94,7 @@ interface KimiSessionContext {
   readonly interruptedTurnIds: Set<TurnId>;
   readonly turns: Array<{ id: TurnId; items: Array<unknown> }>;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
+  readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
   notificationFiber: Fiber.Fiber<void, never> | undefined;
   readonly supportsImages: boolean;
   stopped: boolean;
@@ -105,6 +114,52 @@ function selectAutoApprovedPermissionOption(
     (candidate) => candidate.kind === "allow_always" || candidate.kind === "allow_once",
   );
   return option?.optionId.trim() || undefined;
+}
+
+function permissionOptionIdForDecision(
+  request: EffectAcpSchema.RequestPermissionRequest,
+  decision: ProviderApprovalDecision,
+): string | undefined {
+  const kind =
+    decision === "acceptForSession"
+      ? "allow_always"
+      : decision === "accept"
+        ? "allow_once"
+        : decision === "decline"
+          ? "reject_once"
+          : undefined;
+  if (!kind) return undefined;
+  return request.options.find((option) => option.kind === kind)?.optionId.trim() || undefined;
+}
+
+function findKimiMode(
+  modeState: AcpSessionModeState | undefined,
+  aliases: ReadonlyArray<string>,
+): string | undefined {
+  if (!modeState) return undefined;
+  for (const alias of aliases) {
+    const normalized = alias.toLowerCase();
+    const mode = modeState.availableModes.find(
+      (entry) => entry.id.toLowerCase() === normalized || entry.name.toLowerCase() === normalized,
+    );
+    if (mode) return mode.id;
+  }
+  return undefined;
+}
+
+function requestedKimiModeId(input: {
+  readonly runtimeMode: ProviderSession["runtimeMode"];
+  readonly interactionMode: "default" | "plan" | undefined;
+  readonly modeState: AcpSessionModeState | undefined;
+}): string | undefined {
+  if (input.interactionMode === "plan") {
+    return findKimiMode(input.modeState, ["plan", "architect"]);
+  }
+  if (input.runtimeMode === "auto") return findKimiMode(input.modeState, ["auto"]);
+  if (input.runtimeMode === "full-access") {
+    return findKimiMode(input.modeState, ["yolo", "code"]);
+  }
+  return findKimiMode(input.modeState, ["default", "ask"]);
 }
 
 function initializedPromptSupportsImages(initializeResult: unknown): boolean {
@@ -181,12 +236,37 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
         (approval) => Deferred.succeed(approval.decision, "cancel").pipe(Effect.ignore),
         { discard: true },
       );
+    const settleUserInputs = (pending: ReadonlyMap<ApprovalRequestId, PendingUserInput>) =>
+      Effect.forEach(
+        pending.values(),
+        (input) => Deferred.succeed(input.answers, {}).pipe(Effect.ignore),
+        { discard: true },
+      );
+    const applyKimiMode = (input: {
+      readonly runtime: AcpSessionRuntime.AcpSessionRuntime["Service"];
+      readonly runtimeMode: ProviderSession["runtimeMode"];
+      readonly interactionMode: "default" | "plan" | undefined;
+      readonly threadId: ThreadId;
+    }) =>
+      Effect.gen(function* () {
+        const modeId = requestedKimiModeId({
+          runtimeMode: input.runtimeMode,
+          interactionMode: input.interactionMode,
+          modeState: yield* input.runtime.getModeState,
+        });
+        if (modeId) yield* input.runtime.setMode(modeId);
+      }).pipe(
+        Effect.mapError((cause) =>
+          mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_mode", cause),
+        ),
+      );
 
     const stopSessionInternal = (context: KimiSessionContext) =>
       Effect.gen(function* () {
         if (context.stopped) return;
         context.stopped = true;
         yield* settleApprovals(context.pendingApprovals);
+        yield* settleUserInputs(context.pendingUserInputs);
         if (context.notificationFiber) yield* Fiber.interrupt(context.notificationFiber);
         yield* Effect.ignore(context.acp.cancel);
         yield* Effect.ignore(Scope.close(context.scope, Exit.void));
@@ -263,19 +343,70 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
             ),
           );
           const pendingApprovals = new Map<ApprovalRequestId, PendingApproval>();
+          const pendingUserInputs = new Map<ApprovalRequestId, PendingUserInput>();
           let context: KimiSessionContext | undefined;
           const started = yield* Effect.gen(function* () {
             yield* acp.handleRequestPermission((params) =>
               mapAcpCallbackFailure(
                 Effect.gen(function* () {
-                  if (input.runtimeMode === "full-access") {
+                  const questions = extractKimiPermissionQuestions(params);
+                  if (questions) {
+                    const requestId = ApprovalRequestId.make(yield* randomUUIDv4);
+                    const answers = yield* Deferred.make<ProviderUserInputAnswers>();
+                    pendingUserInputs.set(requestId, { answers });
+                    yield* publish({
+                      type: "user-input.requested",
+                      ...(yield* nextEventStamp()),
+                      provider: PROVIDER,
+                      threadId: input.threadId,
+                      turnId: context?.activeTurnId,
+                      requestId: RuntimeRequestId.make(requestId),
+                      payload: { questions },
+                      raw: {
+                        source: "acp.jsonrpc",
+                        method: "session/request_permission",
+                        payload: params,
+                      },
+                    });
+                    const resolved = yield* Deferred.await(answers);
+                    pendingUserInputs.delete(requestId);
+                    yield* publish({
+                      type: "user-input.resolved",
+                      ...(yield* nextEventStamp()),
+                      provider: PROVIDER,
+                      threadId: input.threadId,
+                      turnId: context?.activeTurnId,
+                      requestId: RuntimeRequestId.make(requestId),
+                      payload: { answers: resolved },
+                      raw: {
+                        source: "acp.jsonrpc",
+                        method: "session/request_permission",
+                        payload: params,
+                      },
+                    });
+                    const optionId = resolveKimiQuestionPermissionOption({
+                      request: params,
+                      questions,
+                      answers: resolved,
+                    });
+                    return {
+                      outcome: optionId
+                        ? { outcome: "selected" as const, optionId }
+                        : { outcome: "cancelled" as const },
+                    };
+                  }
+
+                  const permission = parsePermissionRequest(params);
+                  const autoAcceptEdit =
+                    input.runtimeMode === "auto-accept-edits" &&
+                    ["edit", "delete", "move"].includes(permission.kind);
+                  if (input.runtimeMode === "full-access" || autoAcceptEdit) {
                     const optionId = selectAutoApprovedPermissionOption(params);
                     if (optionId) return { outcome: { outcome: "selected" as const, optionId } };
                   }
-                  const permission = parsePermissionRequest(params);
                   const requestId = ApprovalRequestId.make(yield* randomUUIDv4);
                   const decision = yield* Deferred.make<ProviderApprovalDecision>();
-                  pendingApprovals.set(requestId, { decision, permission });
+                  pendingApprovals.set(requestId, { decision, request: params });
                   yield* publish(
                     makeAcpRequestOpenedEvent({
                       stamp: yield* nextEventStamp(),
@@ -304,15 +435,17 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
                       decision: resolved,
                     }),
                   );
-                  return {
-                    outcome:
-                      resolved === "cancel"
-                        ? ({ outcome: "cancelled" } as const)
-                        : {
-                            outcome: "selected" as const,
-                            optionId: acpPermissionOutcome(resolved),
-                          },
-                  };
+                  if (resolved === "cancel") return { outcome: { outcome: "cancelled" as const } };
+                  const optionId = permissionOptionIdForDecision(params, resolved);
+                  if (!optionId) {
+                    return yield* new ProviderAdapterRequestError({
+                      provider: PROVIDER,
+                      method: "session/request_permission",
+                      detail: `Kimi did not advertise an ACP option for '${resolved}'.`,
+                      cause: params,
+                    });
+                  }
+                  return { outcome: { outcome: "selected" as const, optionId } };
                 }),
               ),
             );
@@ -334,6 +467,12 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
               mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_config_option", cause),
             ),
           );
+          yield* applyKimiMode({
+            runtime: acp,
+            runtimeMode: input.runtimeMode,
+            interactionMode: undefined,
+            threadId: input.threadId,
+          });
           const now = yield* nowIso;
           const session: ProviderSession = {
             provider: PROVIDER,
@@ -358,6 +497,7 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
             interruptedTurnIds: new Set(),
             turns: [],
             pendingApprovals,
+            pendingUserInputs,
             notificationFiber: undefined,
             supportsImages: initializedPromptSupportsImages(started.initializeResult),
             stopped: false,
@@ -482,6 +622,12 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
               mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_config_option", cause),
             ),
           );
+          yield* applyKimiMode({
+            runtime: context.acp,
+            runtimeMode: context.session.runtimeMode,
+            interactionMode: input.interactionMode,
+            threadId: input.threadId,
+          });
           context.activeTurnId = turnId;
           context.session = {
             ...context.session,
@@ -597,6 +743,7 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
         const activeTurnId = turnId ?? context.activeTurnId;
         if (activeTurnId) context.interruptedTurnIds.add(activeTurnId);
         yield* settleApprovals(context.pendingApprovals);
+        yield* settleUserInputs(context.pendingUserInputs);
         yield* Effect.ignore(
           context.acp.cancel.pipe(
             Effect.mapError((cause) =>
@@ -619,20 +766,31 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
             method: "session/request_permission",
             detail: `Unknown pending approval request: ${requestId}`,
           });
+        if (decision !== "cancel" && !permissionOptionIdForDecision(pending.request, decision)) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "session/request_permission",
+            detail: `Kimi did not advertise an ACP option for '${decision}'.`,
+          });
+        }
         yield* Deferred.succeed(pending.decision, decision);
       });
     const respondToUserInput: KimiAdapterShape["respondToUserInput"] = (
       threadId,
       requestId,
-      _answers,
+      answers,
     ) =>
       Effect.gen(function* () {
-        yield* requireSession(threadId);
-        return yield* new ProviderAdapterRequestError({
-          provider: PROVIDER,
-          method: "session/elicitation",
-          detail: `Unknown pending user-input request: ${requestId}`,
-        });
+        const context = yield* requireSession(threadId);
+        const pending = context.pendingUserInputs.get(requestId);
+        if (!pending) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "session/request_permission",
+            detail: `Unknown pending user-input request: ${requestId}`,
+          });
+        }
+        yield* Deferred.succeed(pending.answers, answers);
       });
     const readThread: KimiAdapterShape["readThread"] = (threadId) =>
       Effect.map(requireSession(threadId), (context) => ({

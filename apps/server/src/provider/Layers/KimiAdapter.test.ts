@@ -47,14 +47,22 @@ async function makeKimiWrapper(extraEnv?: Record<string, string>) {
   return wrapperPath;
 }
 
-async function readRequestMethods(requestLogPath: string) {
+async function readRequests(requestLogPath: string) {
   const raw = await NodeFSP.readFile(requestLogPath, "utf8");
   return raw
     .split("\n")
     .filter((line) => line.trim())
-    .map((line) => JSON.parse(line) as { readonly method?: string })
-    .map((entry) => entry.method);
+    .map(
+      (line) =>
+        JSON.parse(line) as {
+          readonly method?: string;
+          readonly params?: { readonly configId?: string; readonly value?: unknown };
+        },
+    );
 }
+
+const readRequestMethods = (requestLogPath: string) =>
+  readRequests(requestLogPath).then((entries) => entries.map((entry) => entry.method));
 
 const kimiAdapterTestLayer = ServerConfig.layerTest(process.cwd(), {
   prefix: "t3code-kimi-adapter-test-",
@@ -66,7 +74,13 @@ const makeTestAdapter = (binaryPath: string, instanceId = ProviderInstanceId.mak
 it.layer(kimiAdapterTestLayer)("KimiAdapter", (it) => {
   it.effect("starts a Kimi ACP session and emits canonical prompt lifecycle events", () =>
     Effect.gen(function* () {
-      const adapter = yield* makeTestAdapter(yield* Effect.promise(() => makeKimiWrapper()));
+      const directory = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "kimi-acp-mode-")),
+      );
+      const requestLogPath = NodePath.join(directory, "requests.ndjson");
+      const adapter = yield* makeTestAdapter(
+        yield* Effect.promise(() => makeKimiWrapper({ T3_ACP_REQUEST_LOG_PATH: requestLogPath })),
+      );
       const threadId = ThreadId.make("kimi-lifecycle");
       const events: ProviderRuntimeEvent[] = [];
       const completed = yield* Deferred.make<void>();
@@ -96,6 +110,14 @@ it.layer(kimiAdapterTestLayer)("KimiAdapter", (it) => {
         schemaVersion: 1,
         sessionId: "mock-session-1",
       });
+      assert.isTrue(
+        (yield* Effect.promise(() => readRequests(requestLogPath))).some(
+          (entry) =>
+            entry.method === "session/set_config_option" &&
+            entry.params?.configId === "mode" &&
+            entry.params.value === "code",
+        ),
+      );
 
       const turn = yield* adapter.sendTurn({
         threadId,
@@ -165,10 +187,8 @@ it.layer(kimiAdapterTestLayer)("KimiAdapter", (it) => {
       assert.isTrue(yield* first.hasSession(resumedThread));
       assert.isFalse(yield* second.hasSession(resumedThread));
       assert.isTrue(yield* second.hasSession(otherThread));
-      assert.include(
-        yield* Effect.promise(() => readRequestMethods(requestLogPath)),
-        "session/resume",
-      );
+      const requestMethods = yield* Effect.promise(() => readRequestMethods(requestLogPath));
+      assert.include(requestMethods, "session/resume");
 
       yield* first.stopAll();
       assert.isFalse(yield* first.hasSession(resumedThread));
