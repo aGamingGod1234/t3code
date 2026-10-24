@@ -105,4 +105,11 @@ vp i
 
 Read [CONTRIBUTING.md](./CONTRIBUTING.md) before opening an issue or PR.
 
+### Dev container
+
+Open the repository with **Dev Containers: Reopen in Container** in VS Code. The container uses
+Node.js 24 LTS and Corepack to select the pnpm version from `package.json`, then installs the
+committed `pnpm-lock.yaml` with frozen resolution. Run the project-local Vite+ CLI with
+`corepack pnpm exec vp run dev` to start development, or `corepack pnpm exec vp --help` for its commands.
+
 Need support? Join the [Discord](https://discord.gg/jn4EGJjrvv).
