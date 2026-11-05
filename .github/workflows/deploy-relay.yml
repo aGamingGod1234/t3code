@@ -17,7 +17,7 @@ concurrency:
 jobs:
   deploy_relay:
     name: Deploy production relay
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: boat-large
     timeout-minutes: 15
     environment:
       name: production
